@@ -6,7 +6,7 @@ CFLAGS += -Wall -Iinclude -ffast-math
 ifeq ($(DEBUG), 1)
 CFLAGS += -O0 -ggdb
 else
-ifeq ($(platform), $(filter $(platform), vita ctr))
+ifeq ($(platform), $(filter $(platform), vita ctr emscripten))
 CFLAGS += -O3 -DNDEBUG
 else
 CFLAGS += -O2 -DNDEBUG
