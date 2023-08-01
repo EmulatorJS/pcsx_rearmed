@@ -1,9 +1,14 @@
 #include <lightrec.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
 #include <assert.h>
+
+#if P_HAVE_MMAP
+#include <sys/mman.h>
+#endif
 
 #include "../cdrom.h"
 #include "../gpu.h"
@@ -49,6 +54,8 @@
 
 psxRegisters psxRegs;
 Rcnt rcnts[4];
+
+void* code_buffer;
 
 static struct lightrec_state *lightrec_state;
 
@@ -399,10 +406,29 @@ static bool lightrec_can_hw_direct(u32 kaddr, bool is_write, u8 size)
 	}
 }
 
+#if defined(HW_DOL) || defined(HW_RVL)
+static void lightrec_code_inv(void *ptr, uint32_t len)
+{
+	extern void DCFlushRange(void *ptr, u32 len);
+	extern void ICInvalidateRange(void *ptr, u32 len);
+
+	DCFlushRange(ptr, len);
+	ICInvalidateRange(ptr, len);
+}
+#elif defined(HW_WUP)
+static void lightrec_code_inv(void *ptr, uint32_t len)
+{
+	wiiu_clear_cache(ptr, (void *)((uintptr_t)ptr + len));
+}
+#endif
+
 static const struct lightrec_ops lightrec_ops = {
 	.cop2_op = cop2_op,
 	.enable_ram = lightrec_enable_ram,
 	.hw_direct = lightrec_can_hw_direct,
+#if defined(HW_DOL) || defined(HW_RVL) || defined(HW_WUP)
+	.code_inv = lightrec_code_inv,
+#endif
 };
 
 static int lightrec_plugin_init(void)
@@ -413,12 +439,27 @@ static int lightrec_plugin_init(void)
 	lightrec_map[PSX_MAP_HW_REGISTERS].address = psxH + 0x1000;
 	lightrec_map[PSX_MAP_PARALLEL_PORT].address = psxP;
 
+	if (!LIGHTREC_CUSTOM_MAP) {
+#if P_HAVE_MMAP
+		code_buffer = mmap(0, CODE_BUFFER_SIZE,
+				   PROT_EXEC | PROT_READ | PROT_WRITE,
+				   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (code_buffer == MAP_FAILED)
+			return -ENOMEM;
+#else
+		code_buffer = malloc(CODE_BUFFER_SIZE);
+		if (!code_buffer)
+			return -ENOMEM;
+#endif
+	}
+
 	if (LIGHTREC_CUSTOM_MAP) {
 		lightrec_map[PSX_MAP_MIRROR1].address = psxM + 0x200000;
 		lightrec_map[PSX_MAP_MIRROR2].address = psxM + 0x400000;
 		lightrec_map[PSX_MAP_MIRROR3].address = psxM + 0x600000;
-		lightrec_map[PSX_MAP_CODE_BUFFER].address = code_buffer;
 	}
+
+	lightrec_map[PSX_MAP_CODE_BUFFER].address = code_buffer;
 
 	use_lightrec_interpreter = !!getenv("LIGHTREC_INTERPRETER");
 
@@ -541,6 +582,14 @@ static void lightrec_plugin_apply_config()
 static void lightrec_plugin_shutdown(void)
 {
 	lightrec_destroy(lightrec_state);
+
+	if (!LIGHTREC_CUSTOM_MAP) {
+#if P_HAVE_MMAP
+		munmap(code_buffer, CODE_BUFFER_SIZE);
+#else
+		free(code_buffer);
+#endif
+	}
 }
 
 static void lightrec_plugin_reset(void)
