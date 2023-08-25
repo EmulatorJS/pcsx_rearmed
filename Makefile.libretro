@@ -544,6 +544,7 @@ else ifeq ($(platform), emscripten)
    CFLAGS += -msimd128 -ftree-vectorize
    ifeq ($(EMULATORJS_THREADS), 1)
       THREAD_RENDERING = 1
+      LIBPTHREAD := -pthread
    else
       LIBPTHREAD :=
    endif
