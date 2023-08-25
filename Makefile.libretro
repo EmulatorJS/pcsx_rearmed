@@ -1,5 +1,6 @@
 # Makefile for PCSX ReARMed (libretro)
 
+EMULATORJS_THREADS ?= 0
 DEBUG ?= 0
 WANT_ZLIB ?= 1
 HAVE_CHD ?= 1
@@ -541,7 +542,11 @@ else ifeq ($(platform), emscripten)
    fpic    := -fPIC
    CFLAGS += -DNO_DYLIB -DNO_SOCKET
    CFLAGS += -msimd128 -ftree-vectorize
-   LIBPTHREAD :=
+   ifeq ($(EMULATORJS_THREADS), 1)
+      THREAD_RENDERING = 1
+   else
+      LIBPTHREAD :=
+   endif
    LIBDL :=
    DYNAREC := 0
    STATIC_LINKING = 1
