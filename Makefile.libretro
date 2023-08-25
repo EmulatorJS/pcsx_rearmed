@@ -545,6 +545,8 @@ else ifeq ($(platform), emscripten)
    ifeq ($(EMULATORJS_THREADS), 1)
       THREAD_RENDERING = 1
       LIBPTHREAD := -pthread
+      CFLAGS += -pthread
+      CXXFLAGS += -pthread
    else
       LIBPTHREAD :=
    endif
