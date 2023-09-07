@@ -13,6 +13,8 @@
 
 #include <stdint.h>
 
+//#define RAW_FB_DISPLAY
+
 #define gpu_log(fmt, ...) \
   printf("%d:%03d: " fmt, *gpu.state.frame_count, *gpu.state.hcnt, ##__VA_ARGS__)
 
@@ -154,7 +156,7 @@ uint32_t GPUreadStatus(void);
 void GPUwriteStatus(uint32_t data);
 long GPUfreeze(uint32_t type, struct GPUFreeze *freeze);
 void GPUupdateLace(void);
-long GPUopen(void **dpy);
+long GPUopen(unsigned long *disp, char *cap, char *cfg);
 long GPUclose(void);
 void GPUvBlank(int is_vblank, int lcf);
 void GPUrearmedCallbacks(const struct rearmed_cbs *cbs_);

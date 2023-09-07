@@ -62,6 +62,7 @@ static noinline void do_reset(void)
   gpu.screen.hres = gpu.screen.w = 256;
   gpu.screen.vres = gpu.screen.h = 240;
   gpu.screen.x = gpu.screen.y = 0;
+  renderer_sync_ecmds(gpu.ex_regs);
   renderer_notify_res_change();
 }
 
@@ -187,8 +188,12 @@ static noinline int decide_frameskip_allow(uint32_t cmd_e3)
   return gpu.frameskip.allow;
 }
 
+static void flush_cmd_buffer(void);
+
 static noinline void get_gpu_info(uint32_t data)
 {
+  if (unlikely(gpu.cmd_len > 0))
+    flush_cmd_buffer();
   switch (data & 0x0f) {
     case 0x02:
     case 0x03:
@@ -690,6 +695,10 @@ long GPUdmaChain(uint32_t *rambase, uint32_t start_addr, uint32_t *progress_addr
     log_io(".chain %08lx #%d+%d\n",
       (long)(list - rambase) * 4, len, gpu.cmd_len);
     if (unlikely(gpu.cmd_len > 0)) {
+      if (gpu.cmd_len + len > ARRAY_SIZE(gpu.cmd_buffer)) {
+        log_anomaly("cmd_buffer overflow, likely garbage commands\n");
+        gpu.cmd_len = 0;
+      }
       memcpy(gpu.cmd_buffer + gpu.cmd_len, list + 1, len * 4);
       gpu.cmd_len += len;
       flush_cmd_buffer();
@@ -831,6 +840,7 @@ void GPUupdateLace(void)
     flush_cmd_buffer();
   renderer_flush_queues();
 
+#ifndef RAW_FB_DISPLAY
   if (gpu.status & PSX_GPU_STATUS_BLANKING) {
     if (!gpu.state.blanked) {
       vout_blank();
@@ -844,6 +854,7 @@ void GPUupdateLace(void)
 
   if (!gpu.state.fb_dirty)
     return;
+#endif
 
   if (gpu.frameskip.set) {
     if (!gpu.frameskip.frame_ready) {

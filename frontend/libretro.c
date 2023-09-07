@@ -518,6 +518,10 @@ void pl_update_gun(int *xn, int *yn, int *xres, int *yres, int *in)
 {
 }
 
+void pl_gun_byte2(int port, unsigned char byte)
+{
+}
+
 /* sound calls */
 static void snd_feed(void *buf, int bytes)
 {
@@ -1948,18 +1952,13 @@ static void update_variables(bool in_flight)
 
    {
       R3000Acpu *prev_cpu = psxCpu;
-#if defined(LIGHTREC)
-      bool can_use_dynarec = found_bios;
-#else
-      bool can_use_dynarec = 1;
-#endif
 
 #ifdef _3DS
       if (!__ctr_svchax)
          Config.Cpu = CPU_INTERPRETER;
       else
 #endif
-      if (strcmp(var.value, "disabled") == 0 || !can_use_dynarec)
+      if (strcmp(var.value, "disabled") == 0)
          Config.Cpu = CPU_INTERPRETER;
       else if (strcmp(var.value, "enabled") == 0)
          Config.Cpu = CPU_DYNAREC;
