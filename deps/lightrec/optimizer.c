@@ -114,6 +114,8 @@ static u64 opcode_read_mask(union code op)
 	case OP_SWL:
 	case OP_SW:
 	case OP_SWR:
+	case OP_META_LWU:
+	case OP_META_SWU:
 		return BIT(op.i.rs) | BIT(op.i.rt);
 	case OP_META:
 		return BIT(op.m.rs);
@@ -186,6 +188,7 @@ u64 opcode_write_mask(union code op)
 	case OP_LBU:
 	case OP_LHU:
 	case OP_LWR:
+	case OP_META_LWU:
 		return BIT(op.i.rt);
 	case OP_JAL:
 		return BIT(31);
@@ -382,6 +385,7 @@ bool opcode_is_load(union code op)
 	case OP_LHU:
 	case OP_LWR:
 	case OP_LWC2:
+	case OP_META_LWU:
 		return true;
 	default:
 		return false;
@@ -397,6 +401,7 @@ static bool opcode_is_store(union code op)
 	case OP_SWL:
 	case OP_SWR:
 	case OP_SWC2:
+	case OP_META_SWU:
 		return true;
 	default:
 		return false;
@@ -438,6 +443,7 @@ static bool is_nop(union code op)
 		case OP_LBU:
 		case OP_LHU:
 		case OP_LWR:
+		case OP_META_LWU:
 			return false;
 		default:
 			return true;
@@ -822,6 +828,7 @@ static void lightrec_patch_known_zero(struct opcode *op,
 	case OP_SWL:
 	case OP_SW:
 	case OP_SWR:
+	case OP_META_SWU:
 		if (is_known_zero(v, op->i.rt))
 			op->i.rt = 0;
 		fallthrough;
@@ -834,6 +841,7 @@ static void lightrec_patch_known_zero(struct opcode *op,
 	case OP_LWR:
 	case OP_LWC2:
 	case OP_SWC2:
+	case OP_META_LWU:
 		if (is_known(v, op->i.rs)
 		    && kunseg(v[op->i.rs].value) == 0)
 			op->i.rs = 0;
@@ -867,12 +875,19 @@ static void lightrec_reset_syncs(struct block *block)
 	}
 }
 
+static void maybe_remove_load_delay(struct opcode *op)
+{
+	if (op_flag_load_delay(op->flags) && opcode_is_load(op->c))
+		op->flags &= ~LIGHTREC_LOAD_DELAY;
+}
+
 static int lightrec_transform_ops(struct lightrec_state *state, struct block *block)
 {
 	struct opcode *op, *list = block->opcode_list;
 	struct constprop_data v[32] = LIGHTREC_CONSTPROP_INITIALIZER;
 	unsigned int i;
 	bool local;
+	int idx;
 	u8 tmp;
 
 	for (i = 0; i < block->nb_ops; i++) {
@@ -907,6 +922,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				   (v[op->i.rs].value ^ v[op->i.rt].value)) {
 				pr_debug("Found never-taken BEQ\n");
 
+				if (!op_flag_no_ds(op->flags))
+					maybe_remove_load_delay(&list[i + 1]);
+
 				local = op_flag_local_branch(op->flags);
 				op->opcode = 0;
 				op->flags = 0;
@@ -930,6 +948,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			} else if (is_known(v, op->i.rs) && is_known(v, op->i.rt) &&
 				   v[op->i.rs].value == v[op->i.rt].value) {
 				pr_debug("Found never-taken BNE\n");
+
+				if (!op_flag_no_ds(op->flags))
+					maybe_remove_load_delay(&list[i + 1]);
 
 				local = op_flag_local_branch(op->flags);
 				op->opcode = 0;
@@ -958,6 +979,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			if (v[op->i.rs].known & BIT(31) &&
 			    v[op->i.rs].value & BIT(31)) {
 				pr_debug("Found never-taken BGTZ\n");
+
+				if (!op_flag_no_ds(op->flags))
+					maybe_remove_load_delay(&list[i + 1]);
 
 				local = op_flag_local_branch(op->flags);
 				op->opcode = 0;
@@ -1001,6 +1025,40 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 				}
 			}
 			break;
+		case OP_LWL:
+		case OP_LWR:
+			if (i == 0 || !has_delay_slot(list[i - 1].c)) {
+				idx = find_next_reader(list, i + 1, op->i.rt);
+				if (idx > 0 && list[idx].i.op == (op->i.op ^ 0x4)
+				    && list[idx].i.rs == op->i.rs
+				    && list[idx].i.rt == op->i.rt
+				    && abs((s16)op->i.imm - (s16)list[idx].i.imm) == 3) {
+					/* Replace a LWL/LWR combo with a META_LWU */
+					if (op->i.op == OP_LWL)
+						op->i.imm -= 3;
+					op->i.op = OP_META_LWU;
+					list[idx].opcode = 0;
+					pr_debug("Convert LWL/LWR to LWU\n");
+				}
+			}
+			break;
+		case OP_SWL:
+		case OP_SWR:
+			if (i == 0 || !has_delay_slot(list[i - 1].c)) {
+				idx = find_next_reader(list, i + 1, op->i.rt);
+				if (idx > 0 && list[idx].i.op == (op->i.op ^ 0x4)
+				    && list[idx].i.rs == op->i.rs
+				    && list[idx].i.rt == op->i.rt
+				    && abs((s16)op->i.imm - (s16)list[idx].i.imm) == 3) {
+					/* Replace a SWL/SWR combo with a META_SWU */
+					if (op->i.op == OP_SWL)
+						op->i.imm -= 3;
+					op->i.op = OP_META_SWU;
+					list[idx].opcode = 0;
+					pr_debug("Convert SWL/SWR to SWU\n");
+				}
+			}
+			break;
 		case OP_REGIMM:
 			switch (op->r.rt) {
 			case OP_REGIMM_BLTZ:
@@ -1016,6 +1074,9 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 					op->i.rt = 0;
 				} else {
 					pr_debug("Found never-taken BLTZ/BGEZ\n");
+
+					if (!op_flag_no_ds(op->flags))
+						maybe_remove_load_delay(&list[i + 1]);
 
 					local = op_flag_local_branch(op->flags);
 					op->opcode = 0;

@@ -51,7 +51,7 @@ extern long CALLBACK SPUinit(void);
 extern long CALLBACK SPUshutdown(void);
 extern long CALLBACK SPUclose(void);
 extern void CALLBACK SPUwriteRegister(unsigned long, unsigned short, unsigned int);
-extern unsigned short CALLBACK SPUreadRegister(unsigned long);
+extern unsigned short CALLBACK SPUreadRegister(unsigned long, unsigned int);
 extern void CALLBACK SPUwriteDMAMem(unsigned short *, int, unsigned int);
 extern void CALLBACK SPUreadDMAMem(unsigned short *, int, unsigned int);
 extern void CALLBACK SPUplayADPCMchannel(void *, unsigned int, int);
@@ -74,10 +74,7 @@ static long CALLBACK PADreadPort1(PadDataS *pad) {
 	pad->controllerType = in_type[pad_index];
 	pad->buttonStatus = ~in_keystate[pad_index];
 
-	if (multitap1 == 1)
-		pad->portMultitap = 1;
-	else
-		pad->portMultitap = 0;
+	pad->portMultitap = multitap1;
 
 	if (in_type[pad_index] == PSE_PAD_TYPE_ANALOGJOY || in_type[pad_index] == PSE_PAD_TYPE_ANALOGPAD || in_type[pad_index] == PSE_PAD_TYPE_NEGCON || in_type[pad_index] == PSE_PAD_TYPE_GUNCON)
 	{
@@ -105,10 +102,7 @@ static long CALLBACK PADreadPort2(PadDataS *pad) {
 	pad->controllerType = in_type[pad_index];
 	pad->buttonStatus = ~in_keystate[pad_index];
 
-	if (multitap2 == 1)
-		pad->portMultitap = 2;
-	else
-		pad->portMultitap = 0;
+	pad->portMultitap = multitap2;
 
 	if (in_type[pad_index] == PSE_PAD_TYPE_ANALOGJOY || in_type[pad_index] == PSE_PAD_TYPE_ANALOGPAD || in_type[pad_index] == PSE_PAD_TYPE_NEGCON || in_type[pad_index] == PSE_PAD_TYPE_GUNCON)
 	{
@@ -145,6 +139,7 @@ extern long GPUdmaChain(uint32_t *,uint32_t);
 extern void GPUupdateLace(void);
 extern long GPUfreeze(uint32_t, void *);
 extern void GPUvBlank(int, int);
+extern void GPUgetScreenInfo(int *y, int *base_hres);
 extern void GPUrearmedCallbacks(const struct rearmed_cbs *cbs);
 
 
@@ -228,6 +223,7 @@ static const struct {
 	DIRECT_GPU(GPUdmaChain),
 	DIRECT_GPU(GPUfreeze),
 	DIRECT_GPU(GPUvBlank),
+	DIRECT_GPU(GPUgetScreenInfo),
 	DIRECT_GPU(GPUrearmedCallbacks),
 
 	DIRECT_GPU(GPUdisplayText),
@@ -313,7 +309,7 @@ pc_hook_func_ret(long,     GPU_dmaChain, (uint32_t *a0, int32_t a1), (a0, a1), P
 pc_hook_func              (GPU_updateLace, (void), (), PCNT_GPU)
 
 pc_hook_func              (SPU_writeRegister, (unsigned long a0, unsigned short a1, uint32_t a2), (a0, a1, a2), PCNT_SPU)
-pc_hook_func_ret(unsigned short,SPU_readRegister, (unsigned long a0), (a0), PCNT_SPU)
+pc_hook_func_ret(unsigned short,SPU_readRegister, (unsigned long a0, , unsigned int a1), (a0, a1), PCNT_SPU)
 pc_hook_func              (SPU_writeDMAMem, (unsigned short *a0, int a1, uint32_t a2), (a0, a1, a2), PCNT_SPU)
 pc_hook_func              (SPU_readDMAMem, (unsigned short *a0, int a1, uint32_t a2), (a0, a1, a2), PCNT_SPU)
 pc_hook_func              (SPU_playADPCMchannel, (void *a0, unsigned int a1, int a2), (a0, a1, a2), PCNT_SPU)

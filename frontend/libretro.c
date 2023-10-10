@@ -27,9 +27,9 @@
 #include "../libpcsxcore/cdriso.h"
 #include "../libpcsxcore/cheat.h"
 #include "../libpcsxcore/r3000a.h"
+#include "../libpcsxcore/gpu.h"
 #include "../plugins/dfsound/out.h"
 #include "../plugins/dfsound/spu_config.h"
-#include "../plugins/dfinput/externals.h"
 #include "cspace.h"
 #include "main.h"
 #include "menu.h"
@@ -81,6 +81,7 @@ static void *vout_buf;
 static void *vout_buf_ptr;
 static int vout_width, vout_height;
 static int vout_fb_dirty;
+static int psx_w, psx_h;
 static bool vout_can_dupe;
 static bool duping_enable;
 static bool found_bios;
@@ -240,6 +241,8 @@ static void vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
 {
    vout_width = w;
    vout_height = h;
+   psx_w = raw_w;
+   psx_h = raw_h;
 
    if (previous_width != vout_width || previous_height != vout_height)
    {
@@ -486,6 +489,7 @@ struct rearmed_cbs pl_rearmed_cbs = {
    .pl_vout_close    = vout_close,
    .mmap             = pl_mmap,
    .munmap           = pl_munmap,
+   .gpu_state_change = gpu_state_change,
    /* from psxcounters */
    .gpu_hcnt         = &hSyncCount,
    .gpu_frame_count  = &frame_counter,
@@ -512,10 +516,6 @@ void plat_trigger_vibrate(int pad, int low, int high)
       rumble_cb(pad, RETRO_RUMBLE_STRONG, high << 8);
       rumble_cb(pad, RETRO_RUMBLE_WEAK, low ? 0xffff : 0x0);
    }
-}
-
-void pl_update_gun(int *xn, int *yn, int *xres, int *yres, int *in)
-{
 }
 
 void pl_gun_byte2(int port, unsigned char byte)
@@ -995,12 +995,13 @@ void retro_cheat_reset(void)
 
 void retro_cheat_set(unsigned index, bool enabled, const char *code)
 {
-   char buf[256];
-   int ret;
+   int ret = -1;
+   char *buf;
 
-   // cheat funcs are destructive, need a copy..
-   strncpy(buf, code, sizeof(buf));
-   buf[sizeof(buf) - 1] = 0;
+   // cheat funcs are destructive, need a copy...
+   buf = strdup(code);
+   if (buf == NULL)
+      goto finish;
 
    //Prepare buffered cheat for PCSX's AddCheat fucntion.
    int cursor = 0;
@@ -1026,10 +1027,12 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
    else
       ret = AddCheat("", buf);
 
+finish:
    if (ret != 0)
       SysPrintf("Failed to set cheat %#u\n", index);
    else if (index < NumCheats)
       Cheats[index].Enabled = enabled;
+   free(buf);
 }
 
 // just in case, maybe a win-rt port in the future?
@@ -2477,13 +2480,13 @@ static void update_input_guncon(int port, int ret)
    //Offscreen value is chosen to be well out of range of any possible scaling done via core options
    if (input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_IS_OFFSCREEN) || input_state_cb(port, RETRO_DEVICE_LIGHTGUN, 0, RETRO_DEVICE_ID_LIGHTGUN_RELOAD))
    {
-      in_analog_left[port][0] = (65536 - 512) * 64;
-      in_analog_left[port][1] = (65536 - 512) * 64;
+      in_analog_left[port][0] = 65536;
+      in_analog_left[port][1] = 65536;
    }
    else
    {
-      in_analog_left[port][0] = (gunx * GunconAdjustRatioX) + (GunconAdjustX * 655);
-      in_analog_left[port][1] = (guny * GunconAdjustRatioY) + (GunconAdjustY * 655);
+      in_analog_left[port][0] = ((gunx * GunconAdjustRatioX) + (GunconAdjustX * 655)) / 64 + 512;
+      in_analog_left[port][1] = ((guny * GunconAdjustRatioY) + (GunconAdjustY * 655)) / 64 + 512;
    }
 	
    //GUNCON has 3 controls, Trigger,A,B which equal Circle,Start,Cross
@@ -3119,7 +3122,6 @@ void retro_init(void)
 #endif
    pl_rearmed_cbs.gpu_peops.iUseDither = 1;
    pl_rearmed_cbs.gpu_peops.dwActFixes = GPU_PEOPS_OLD_FRAME_SKIP;
-   spu_config.iUseFixedUpdates = 1;
 
    SaveFuncs.open = save_open;
    SaveFuncs.read = save_read;

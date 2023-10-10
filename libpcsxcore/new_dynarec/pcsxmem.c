@@ -180,6 +180,29 @@ make_dma_func(3)
 make_dma_func(4)
 make_dma_func(6)
 
+static u32 io_spu_read8_even(u32 addr)
+{
+	return SPU_readRegister(addr, psxRegs.cycle) & 0xff;
+}
+
+static u32 io_spu_read8_odd(u32 addr)
+{
+	return SPU_readRegister(addr, psxRegs.cycle) >> 8;
+}
+
+static u32 io_spu_read16(u32 addr)
+{
+	return SPU_readRegister(addr, psxRegs.cycle);
+}
+
+static u32 io_spu_read32(u32 addr)
+{
+	u32 ret;
+	ret  = SPU_readRegister(addr, psxRegs.cycle);
+	ret |= SPU_readRegister(addr + 2, psxRegs.cycle) << 16;
+	return ret;
+}
+
 static void io_spu_write16(u32 value)
 {
 	// meh
@@ -193,27 +216,6 @@ static void io_spu_write32(u32 value)
 
 	wfunc(a, value & 0xffff, psxRegs.cycle);
 	wfunc(a + 2, value >> 16, psxRegs.cycle);
-}
-
-static u32 io_gpu_read_status(void)
-{
-	u32 v;
-
-	// meh2, syncing for img bit, might want to avoid it..
-	gpuSyncPluginSR();
-	v = HW_GPU_STATUS;
-
-	// XXX: because of large timeslices can't use hSyncCount, using rough
-	// approximization instead. Perhaps better use hcounter code here or something.
-	if (hSyncCount < 240 && (HW_GPU_STATUS & PSXGPU_ILACE_BITS) != PSXGPU_ILACE_BITS)
-		v |= PSXGPU_LCF & (psxRegs.cycle << 20);
-	return v;
-}
-
-static void io_gpu_write_status(u32 value)
-{
-	GPU_writeStatus(value);
-	gpuSyncPluginSR();
 }
 
 void new_dyna_pcsx_mem_isolate(int enable)
@@ -244,9 +246,6 @@ static u32 read_biu(u32 addr)
 	if (addr != 0xfffe0130)
 		return read_mem_dummy(addr);
 
- FILE *f = fopen("/tmp/psxbiu.bin", "wb");
- fwrite(psxM, 1, 0x200000, f);
- fclose(f);
 	memprintf("read_biu  %08x @%08x %u\n",
 		psxRegs.biuReg, psxRegs.pc, psxRegs.cycle);
 	return psxRegs.biuReg;
@@ -365,7 +364,7 @@ void new_dyna_pcsx_mem_init(void)
 	map_item(&mem_iortab[IOMEM32(0x1124)], io_rcnt_read_mode2, 1);
 	map_item(&mem_iortab[IOMEM32(0x1128)], io_rcnt_read_target2, 1);
 //	map_item(&mem_iortab[IOMEM32(0x1810)], GPU_readData, 1);
-	map_item(&mem_iortab[IOMEM32(0x1814)], io_gpu_read_status, 1);
+	map_item(&mem_iortab[IOMEM32(0x1814)], psxHwReadGpuSR, 1);
 	map_item(&mem_iortab[IOMEM32(0x1820)], mdecRead0, 1);
 	map_item(&mem_iortab[IOMEM32(0x1824)], mdecRead1, 1);
 
@@ -390,6 +389,13 @@ void new_dyna_pcsx_mem_init(void)
 	map_item(&mem_iortab[IOMEM8(0x1802)], cdrRead2, 1);
 	map_item(&mem_iortab[IOMEM8(0x1803)], cdrRead3, 1);
 
+	for (i = 0x1c00; i < 0x2000; i += 2) {
+		map_item(&mem_iortab[IOMEM8(i)], io_spu_read8_even, 1);
+		map_item(&mem_iortab[IOMEM8(i+1)], io_spu_read8_odd, 1);
+		map_item(&mem_iortab[IOMEM16(i)], io_spu_read16, 1);
+		map_item(&mem_iortab[IOMEM32(i)], io_spu_read32, 1);
+	}
+
 	// write(u32 data)
 	map_item(&mem_iowtab[IOMEM32(0x1040)], io_write_sio32, 1);
 	map_item(&mem_iowtab[IOMEM32(0x1070)], psxHwWriteIstat, 1);
@@ -411,7 +417,7 @@ void new_dyna_pcsx_mem_init(void)
 	map_item(&mem_iowtab[IOMEM32(0x1124)], io_rcnt_write_mode2, 1);
 	map_item(&mem_iowtab[IOMEM32(0x1128)], io_rcnt_write_target2, 1);
 //	map_item(&mem_iowtab[IOMEM32(0x1810)], GPU_writeData, 1);
-	map_item(&mem_iowtab[IOMEM32(0x1814)], io_gpu_write_status, 1);
+	map_item(&mem_iowtab[IOMEM32(0x1814)], psxHwWriteGpuSR, 1);
 	map_item(&mem_iowtab[IOMEM32(0x1820)], mdecWrite0, 1);
 	map_item(&mem_iowtab[IOMEM32(0x1824)], mdecWrite1, 1);
 
@@ -459,15 +465,13 @@ void new_dyna_pcsx_mem_init(void)
 
 void new_dyna_pcsx_mem_reset(void)
 {
-	int i;
-
 	// plugins might change so update the pointers
 	map_item(&mem_iortab[IOMEM32(0x1810)], GPU_readData, 1);
-
-	for (i = 0x1c00; i < 0x2000; i += 2)
-		map_item(&mem_iortab[IOMEM16(i)], SPU_readRegister, 1);
-
 	map_item(&mem_iowtab[IOMEM32(0x1810)], GPU_writeData, 1);
+	if (Config.hacks.gpu_busy_hack)
+		map_item(&mem_iortab[IOMEM32(0x1814)], psxHwReadGpuSRbusyHack, 1);
+	else
+		map_item(&mem_iortab[IOMEM32(0x1814)], psxHwReadGpuSR, 1);
 }
 
 void new_dyna_pcsx_mem_shutdown(void)

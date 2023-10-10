@@ -114,6 +114,7 @@ struct psx_gpu {
     (int *x, int *y, int *w, int *h, int *vram_h);
   void *(*mmap)(unsigned int size);
   void  (*munmap)(void *ptr, unsigned int size);
+  void  (*gpu_state_change)(int what); // psx_gpu_state
 };
 
 extern struct psx_gpu gpu;
@@ -159,6 +160,7 @@ void GPUupdateLace(void);
 long GPUopen(unsigned long *disp, char *cap, char *cfg);
 long GPUclose(void);
 void GPUvBlank(int is_vblank, int lcf);
+void GPUgetScreenInfo(int *y, int *base_hres);
 void GPUrearmedCallbacks(const struct rearmed_cbs *cbs_);
 
 #ifdef __cplusplus

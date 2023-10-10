@@ -128,6 +128,19 @@ static void intExceptionInsn(psxRegisters *regs, u32 cause)
 	intException(regs, regs->pc - 4, cause);
 }
 
+static noinline void intExceptionReservedInsn(psxRegisters *regs)
+{
+#ifdef DO_EXCEPTION_RESERVEDI
+	static u32 ppc_ = ~0u;
+	if (regs->pc != ppc_) {
+		SysPrintf("reserved instruction %08x @%08x ra=%08x\n",
+			regs->code, regs->pc - 4, regs->GPR.n.ra);
+		ppc_ = regs->pc;
+	}
+	intExceptionInsn(regs, R3000E_RI << 2);
+#endif
+}
+
 // 29  Enable for 80000000-ffffffff
 // 30  Enable for 00000000-7fffffff
 // 31  Enable exception
@@ -163,25 +176,21 @@ static int execBreakCheck(psxRegisters *regs, u32 pc)
 // get an opcode without triggering exceptions or affecting cache
 u32 intFakeFetch(u32 pc)
 {
-	u8 *base = psxMemRLUT[pc >> 16];
-	u32 *code;
-	if (unlikely(base == INVALID_PTR))
+	u32 *code = (u32 *)psxm(pc & ~0x3, 0);
+	if (unlikely(code == INVALID_PTR))
 		return 0; // nop
-	code = (u32 *)(base + (pc & 0xfffc));
 	return SWAP32(*code);
 
 }
 
 static u32 INT_ATTR fetchNoCache(psxRegisters *regs, u8 **memRLUT, u32 pc)
 {
-	u8 *base = memRLUT[pc >> 16];
-	u32 *code;
-	if (unlikely(base == INVALID_PTR)) {
+	u32 *code = (u32 *)psxm_lut(pc & ~0x3, 0, memRLUT);
+	if (unlikely(code == INVALID_PTR)) {
 		SysPrintf("game crash @%08x, ra=%08x\n", pc, regs->GPR.n.ra);
 		intException(regs, pc, R3000E_IBE << 2);
 		return 0; // execute as nop
 	}
-	code = (u32 *)(base + (pc & 0xfffc));
 	return SWAP32(*code);
 }
 
@@ -204,14 +213,12 @@ static u32 INT_ATTR fetchICache(psxRegisters *regs, u8 **memRLUT, u32 pc)
 
 		if (((entry->tag ^ pc) & 0xfffffff0) != 0 || pc < entry->tag)
 		{
-			const u8 *base = memRLUT[pc >> 16];
-			const u32 *code;
-			if (unlikely(base == INVALID_PTR)) {
+			const u32 *code = (u32 *)psxm_lut(pc & ~0xf, 0, memRLUT);
+			if (unlikely(code == INVALID_PTR)) {
 				SysPrintf("game crash @%08x, ra=%08x\n", pc, regs->GPR.n.ra);
 				intException(regs, pc, R3000E_IBE << 2);
 				return 0; // execute as nop
 			}
-			code = (u32 *)(base + (pc & 0xfff0));
 
 			entry->tag = pc;
 			// treat as 4 words, although other configurations are said to be possible
@@ -923,10 +930,8 @@ OP(psxSWRe) { if (checkST(regs_, _oB_     , 0)) doSWR(regs_, _Rt_, _oB_); }
 *********************************************************/
 OP(psxMFC0) {
 	u32 r = _Rd_;
-#ifdef DO_EXCEPTION_RESERVEDI
 	if (unlikely(0x00000417u & (1u << r)))
-		intExceptionInsn(regs_, R3000E_RI << 2);
-#endif
+		intExceptionReservedInsn(regs_);
 	doLoad(regs_, _Rt_, regs_->CP0.r[r]);
 }
 
@@ -974,9 +979,7 @@ static inline void psxNULLne(psxRegisters *regs) {
 
 OP(psxNULL) {
 	psxNULLne(regs_);
-#ifdef DO_EXCEPTION_RESERVEDI
-	intExceptionInsn(regs_, R3000E_RI << 2);
-#endif
+	intExceptionReservedInsn(regs_);
 }
 
 void gteNULL(struct psxCP2Regs *regs) {
