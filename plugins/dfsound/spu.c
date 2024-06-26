@@ -1000,8 +1000,10 @@ static void queue_channel_work(int ns_to, unsigned int silentch)
    if (unlikely(s_chan->bFMod == 2))
    {
     // sucks, have to do double work
-    assert(!s_chan->bNoise);
-    d = do_samples_gauss(tmpFMod, decode_block, NULL, ch, ns_to,
+    if (s_chan->bNoise)
+     d = do_samples_noise(tmpFMod, ch, ns_to);
+    else
+     d = do_samples_gauss(tmpFMod, decode_block, NULL, ch, ns_to,
           &spu.sb[ch], s_chan->sinc, &s_chan->spos, &s_chan->iSBPos);
     if (!s_chan->bStarting) {
      d = MixADSR(tmpFMod, &s_chan->ADSRX, d);
@@ -1243,6 +1245,7 @@ void do_samples(unsigned int cycles_to, int force_no_thread)
 
   spu.cycles_played += ns_to * 768;
   spu.decode_pos = (spu.decode_pos + ns_to) & 0x1ff;
+  spu.spuStat = (spu.spuStat & ~0x800) | ((spu.decode_pos << 3) & 0x800);
 #if 0
   static int ccount; static time_t ctime; ccount++;
   if (time(NULL) != ctime)
@@ -1386,6 +1389,7 @@ void CALLBACK SPUplayADPCMchannel(xa_decode_t *xap, unsigned int cycle, int is_s
 
  FeedXA(xap);                          // call main XA feeder
  spu.xapGlobal = xap;                  // store info for save states
+ spu.cdClearSamples = 512;
 }
 
 // CDDA AUDIO
@@ -1398,6 +1402,7 @@ int CALLBACK SPUplayCDDAchannel(short *pcm, int nbytes, unsigned int cycle, int 
   do_samples(cycle, 1);                // catch up to prevent source underflows later
 
  FeedCDDA((unsigned char *)pcm, nbytes);
+ spu.cdClearSamples = 512;
  return 0;
 }
 

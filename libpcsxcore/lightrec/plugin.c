@@ -10,7 +10,6 @@
 #endif
 
 #include "lightrec.h"
-#include "internals.h"
 #include "../cdrom.h"
 #include "../gpu.h"
 #include "../gte.h"
@@ -54,6 +53,14 @@
 #	define unlikely(x)     (x)
 #endif
 
+#ifndef LIGHTREC_PROG_NAME
+#  ifdef __linux__
+#    define LIGHTREC_PROG_NAME "/proc/self/exe"
+#  else
+#    define LIGHTREC_PROG_NAME "retroarch.exe"
+#  endif
+#endif
+
 psxRegisters psxRegs;
 Rcnt rcnts[4];
 
@@ -61,13 +68,13 @@ void* code_buffer;
 
 static struct lightrec_state *lightrec_state;
 
-static char *name = "retroarch.exe";
-
 static bool use_lightrec_interpreter;
 static bool use_pcsx_interpreter;
 static bool block_stepping;
 
 extern u32 lightrec_hacks;
+
+extern void lightrec_code_inv(void *ptr, uint32_t len);
 
 enum my_cp2_opcodes {
 	OP_CP2_RTPS		= 0x01,
@@ -418,29 +425,11 @@ static bool lightrec_can_hw_direct(u32 kaddr, bool is_write, u8 size)
 	}
 }
 
-#if defined(HW_DOL) || defined(HW_RVL)
-static void lightrec_code_inv(void *ptr, uint32_t len)
-{
-	extern void DCFlushRange(void *ptr, u32 len);
-	extern void ICInvalidateRange(void *ptr, u32 len);
-
-	DCFlushRange(ptr, len);
-	ICInvalidateRange(ptr, len);
-}
-#elif defined(HW_WUP)
-static void lightrec_code_inv(void *ptr, uint32_t len)
-{
-	wiiu_clear_cache(ptr, (void *)((uintptr_t)ptr + len));
-}
-#endif
-
 static const struct lightrec_ops lightrec_ops = {
 	.cop2_op = cop2_op,
 	.enable_ram = lightrec_enable_ram,
 	.hw_direct = lightrec_can_hw_direct,
-#if defined(HW_DOL) || defined(HW_RVL) || defined(HW_WUP)
-	.code_inv = lightrec_code_inv,
-#endif
+	.code_inv = LIGHTREC_CODE_INV ? lightrec_code_inv : NULL,
 };
 
 static int lightrec_plugin_init(void)
@@ -475,7 +464,7 @@ static int lightrec_plugin_init(void)
 
 	use_lightrec_interpreter = !!getenv("LIGHTREC_INTERPRETER");
 
-	lightrec_state = lightrec_init(name,
+	lightrec_state = lightrec_init(LIGHTREC_PROG_NAME,
 			lightrec_map, ARRAY_SIZE(lightrec_map),
 			&lightrec_ops);
 
@@ -611,7 +600,6 @@ static void lightrec_plugin_apply_config()
 	if (cycles_per_op_old && cycles_per_op_old != cycles_per_op) {
 		SysPrintf("lightrec: reinit block cache for cycles_per_op %.2f\n",
 			cycles_per_op / 1024.f);
-		lightrec_plugin_clear_block_caches(lightrec_state);
 	}
 	cycles_per_op_old = cycles_per_op;
 	lightrec_set_cycles_per_opcode(lightrec_state, cycles_per_op);

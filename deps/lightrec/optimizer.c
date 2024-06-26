@@ -642,7 +642,7 @@ lightrec_remove_useless_lui(struct block *block, unsigned int offset,
 		return;
 	}
 
-	if (op->i.imm != 0 || op->i.rt == 0 || offset == block->nb_ops - 1)
+	if (op->i.imm != 0 || op->i.rt == 0 || is_delay_slot(list, offset))
 		return;
 
 	reader = find_next_reader(list, offset + 1, op->i.rt);
@@ -909,8 +909,8 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 		/* Transform all opcodes detected as useless to real NOPs
 		 * (0x0: SLL r0, r0, #0) */
 		if (op->opcode != 0 && is_nop(op->c)) {
-			pr_debug("Converting useless opcode 0x%08x to NOP\n",
-					op->opcode);
+			pr_debug("Converting useless opcode "X32_FMT" to NOP\n",
+				 op->opcode);
 			op->opcode = 0x0;
 		}
 
@@ -1002,10 +1002,10 @@ static int lightrec_transform_ops(struct lightrec_state *state, struct block *bl
 			break;
 
 		case OP_LUI:
-			if (i == 0 || !has_delay_slot(list[i - 1].c))
+			if (!is_delay_slot(list, i))
 				lightrec_modify_lui(block, i);
 			lightrec_remove_useless_lui(block, i, v);
-			if (i == 0 || !has_delay_slot(list[i - 1].c))
+			if (!is_delay_slot(list, i))
 				lightrec_lui_to_movi(block, i);
 			break;
 
@@ -1740,7 +1740,7 @@ static int lightrec_flag_io(struct lightrec_state *state, struct block *block)
 			 * registers as address will never hit a code page. */
 			if (list->i.rs >= 28 && list->i.rs <= 29 &&
 			    !state->maps[PSX_MAP_KERNEL_USER_RAM].ops) {
-				pr_debug("Flaging opcode 0x%08x as not requiring invalidation\n",
+				pr_debug("Flaging opcode "X32_FMT" as not requiring invalidation\n",
 					 list->opcode);
 				list->flags |= LIGHTREC_NO_INVALIDATE;
 			}
@@ -2099,7 +2099,7 @@ static int lightrec_flag_mults_divs(struct lightrec_state *state, struct block *
 			list->flags &= ~(LIGHTREC_NO_LO | LIGHTREC_NO_HI);
 		}
 
-		if (reg_lo > 0 && reg_lo != REG_LO) {
+		if (0/* Broken */ && reg_lo > 0 && reg_lo != REG_LO) {
 			pr_debug("Found register %s to hold LO (rs = %u, rt = %u)\n",
 				 lightrec_reg_name(reg_lo), list->r.rs, list->r.rt);
 
@@ -2109,7 +2109,7 @@ static int lightrec_flag_mults_divs(struct lightrec_state *state, struct block *
 			list->r.rd = 0;
 		}
 
-		if (reg_hi > 0 && reg_hi != REG_HI) {
+		if (0/* Broken */ && reg_hi > 0 && reg_hi != REG_HI) {
 			pr_debug("Found register %s to hold HI (rs = %u, rt = %u)\n",
 				 lightrec_reg_name(reg_hi), list->r.rs, list->r.rt);
 
@@ -2245,7 +2245,7 @@ static int lightrec_replace_memset(struct lightrec_state *state, struct block *b
 
 		if (i == ARRAY_SIZE(memset_code) - 1) {
 			/* success! */
-			pr_debug("Block at PC 0x%x is a memset\n", block->pc);
+			pr_debug("Block at "PC_FMT" is a memset\n", block->pc);
 			block_set_flags(block,
 					BLOCK_IS_MEMSET | BLOCK_NEVER_COMPILE);
 

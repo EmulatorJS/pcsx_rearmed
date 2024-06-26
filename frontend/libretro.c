@@ -15,6 +15,7 @@
 #include <sys/syscall.h>
 #endif
 
+#include "retro_miscellaneous.h"
 #ifdef SWITCH
 #include <switch.h>
 #endif
@@ -130,7 +131,8 @@ static unsigned previous_width = 0;
 static unsigned previous_height = 0;
 
 static int plugins_opened;
-static int is_pal_mode;
+
+#define is_pal_mode Config.PsxType
 
 /* memory card data */
 extern char Mcd1Data[MCD_SIZE];
@@ -293,16 +295,17 @@ static void convert(void *buf, size_t bytes)
 static void addCrosshair(int port, int crosshair_color, unsigned short *buffer, int bufferStride, int pos_x, int pos_y, int thickness, int size_x, int size_y) {
    for (port = 0; port < 2; port++) {
       // Draw the horizontal line of the crosshair
-      for (int i = pos_y - thickness / 2; i <= pos_y + thickness / 2; i++) {
-         for (int j = pos_x - size_x / 2; j <= pos_x + size_x / 2; j++) {
+      int i, j;
+      for (i = pos_y - thickness / 2; i <= pos_y + thickness / 2; i++) {
+         for (j = pos_x - size_x / 2; j <= pos_x + size_x / 2; j++) {
             if ((i + vout_height) >= 0 && (i + vout_height) < bufferStride && j >= 0 && j < bufferStride && in_enable_crosshair[port] > 0)
                buffer[i * bufferStride + j] = crosshair_color;
-      }
          }
+      }
 
       // Draw the vertical line of the crosshair
-      for (int i = pos_x - thickness / 2; i <= pos_x + thickness / 2; i++) {
-         for (int j = pos_y - size_y / 2; j <= pos_y + size_y / 2; j++) {
+      for (i = pos_x - thickness / 2; i <= pos_x + thickness / 2; i++) {
+         for (j = pos_y - size_y / 2; j <= pos_y + size_y / 2; j++) {
             if (i >= 0 && i < bufferStride && (j + vout_height) >= 0 && (j + vout_height) < bufferStride && in_enable_crosshair[port] > 0)
                buffer[j * bufferStride + i] = crosshair_color;
          }
@@ -365,8 +368,8 @@ static void vout_flip(const void *vram, int stride, int bgr24,
    for (port = 0; port < 2; port++) {
       if (in_enable_crosshair[port] > 0 && (in_type[port] == PSE_PAD_TYPE_GUNCON || in_type[port] == PSE_PAD_TYPE_GUN))
       {
-	 struct CrosshairInfo crosshairInfo;
-	 CrosshairDimensions(port, &crosshairInfo);
+         struct CrosshairInfo crosshairInfo;
+         CrosshairDimensions(port, &crosshairInfo);
          addCrosshair(port, in_enable_crosshair[port], dest, dstride, crosshairInfo.pos_x, crosshairInfo.pos_y, crosshairInfo.thickness, crosshairInfo.size_x, crosshairInfo.size_y);
       }
    }
@@ -584,7 +587,6 @@ void pl_frame_limit(void)
 
 void pl_timing_prepare(int is_pal)
 {
-   is_pal_mode = is_pal;
 }
 
 void plat_trigger_vibrate(int pad, int low, int high)
@@ -726,8 +728,8 @@ static bool update_option_visibility(void)
             "pcsx_rearmed_negcon_deadzone",
             "pcsx_rearmed_negcon_response",
             "pcsx_rearmed_input_sensitivity",
-	    "pcsx_rearmed_crosshair1",
-	    "pcsx_rearmed_crosshair2",
+            "pcsx_rearmed_crosshair1",
+            "pcsx_rearmed_crosshair2",
             "pcsx_rearmed_konamigunadjustx",
             "pcsx_rearmed_konamigunadjusty",
             "pcsx_rearmed_gunconadjustx",
@@ -1000,7 +1002,7 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
    unsigned geom_width           = vout_width;
 
    memset(info, 0, sizeof(*info));
-   info->timing.fps              = is_pal_mode ? 50.0 : 60.0;
+   info->timing.fps              = psxGetFps();
    info->timing.sample_rate      = 44100.0;
    info->geometry.base_width     = geom_width;
    info->geometry.base_height    = geom_height;
@@ -1237,12 +1239,31 @@ static void disk_init(void)
    }
 }
 
+#ifdef HAVE_CDROM
+static long CALLBACK rcdrom_open(void);
+static long CALLBACK rcdrom_close(void);
+static void rcdrom_stop_thread(void);
+#endif
+
 static bool disk_set_eject_state(bool ejected)
 {
-   // weird PCSX API..
+   if (ejected != disk_ejected)
+      SysPrintf("new eject_state: %d\n", ejected);
+
+   // weird PCSX API...
    SetCdOpenCaseTime(ejected ? -1 : (time(NULL) + 2));
    LidInterrupt();
 
+#ifdef HAVE_CDROM
+   if (CDR_open == rcdrom_open && ejected != disk_ejected) {
+      rcdrom_stop_thread();
+      if (!ejected) {
+         // likely the real cd was also changed - rescan
+         rcdrom_close();
+         rcdrom_open();
+      }
+   }
+#endif
    disk_ejected = ejected;
    return true;
 }
@@ -1295,8 +1316,7 @@ static bool disk_set_image_index(unsigned int index)
 
    if (!disk_ejected)
    {
-      SetCdOpenCaseTime(time(NULL) + 2);
-      LidInterrupt();
+      disk_set_eject_state(disk_ejected);
    }
 
    disk_current_index = index;
@@ -1496,6 +1516,308 @@ static void extract_directory(char *buf, const char *path, size_t size)
       buf[1] = '\0';
    }
 }
+
+// raw cdrom support
+#ifdef HAVE_CDROM
+#include "vfs/vfs_implementation.h"
+#include "vfs/vfs_implementation_cdrom.h"
+#include "libretro-cdrom.h"
+#include "rthreads/rthreads.h"
+#include "retro_timers.h"
+struct cached_buf {
+   unsigned char buf[2352];
+   unsigned int lba;
+};
+static struct {
+   libretro_vfs_implementation_file *h;
+   sthread_t *thread;
+   slock_t *read_lock;
+   slock_t *buf_lock;
+   scond_t *cond;
+   struct cached_buf *buf;
+   unsigned int buf_cnt, thread_exit, do_prefetch;
+   unsigned int total_lba, prefetch_lba;
+   int check_eject_delay;
+} rcdrom;
+
+static void lbacache_do(unsigned int lba)
+{
+   unsigned char m, s, f, buf[2352];
+   unsigned int i = lba % rcdrom.buf_cnt;
+   int ret;
+
+   cdrom_lba_to_msf(lba + 150, &m, &s, &f);
+   slock_lock(rcdrom.read_lock);
+   ret = cdrom_read_sector(rcdrom.h, lba, buf);
+   slock_lock(rcdrom.buf_lock);
+   slock_unlock(rcdrom.read_lock);
+   //printf("%d:%02d:%02d m%d f%d\n", m, s, f, buf[12+3], ((buf[12+4+2] >> 5) & 1) + 1);
+   if (ret) {
+      rcdrom.do_prefetch = 0;
+      slock_unlock(rcdrom.buf_lock);
+      LogErr("prefetch: cdrom_read_sector failed for lba %d\n", lba);
+      return;
+   }
+   rcdrom.check_eject_delay = 100;
+
+   if (lba != rcdrom.buf[i].lba) {
+      memcpy(rcdrom.buf[i].buf, buf, sizeof(rcdrom.buf[i].buf));
+      rcdrom.buf[i].lba = lba;
+   }
+   slock_unlock(rcdrom.buf_lock);
+   retro_sleep(0); // why does the main thread stall without this?
+}
+
+static int lbacache_get(unsigned int lba, void *buf)
+{
+   unsigned int i;
+   int ret = 0;
+
+   i = lba % rcdrom.buf_cnt;
+   slock_lock(rcdrom.buf_lock);
+   if (lba == rcdrom.buf[i].lba) {
+      memcpy(buf, rcdrom.buf[i].buf, 2352);
+      ret = 1;
+   }
+   slock_unlock(rcdrom.buf_lock);
+   return ret;
+}
+
+static void rcdrom_prefetch_thread(void *unused)
+{
+   unsigned int buf_cnt, lba, lba_to;
+
+   slock_lock(rcdrom.buf_lock);
+   while (!rcdrom.thread_exit)
+   {
+#ifdef __GNUC__
+      __asm__ __volatile__("":::"memory"); // barrier
+#endif
+      if (!rcdrom.do_prefetch)
+         scond_wait(rcdrom.cond, rcdrom.buf_lock);
+      if (!rcdrom.do_prefetch || !rcdrom.h || rcdrom.thread_exit)
+         continue;
+
+      buf_cnt = rcdrom.buf_cnt;
+      lba = rcdrom.prefetch_lba;
+      lba_to = lba + buf_cnt;
+      if (lba_to > rcdrom.total_lba)
+         lba_to = rcdrom.total_lba;
+      for (; lba < lba_to; lba++) {
+         if (lba != rcdrom.buf[lba % buf_cnt].lba)
+            break;
+      }
+      if (lba == lba_to) {
+         // caching complete
+         rcdrom.do_prefetch = 0;
+         continue;
+      }
+
+      slock_unlock(rcdrom.buf_lock);
+      lbacache_do(lba);
+      slock_lock(rcdrom.buf_lock);
+   }
+   slock_unlock(rcdrom.buf_lock);
+}
+
+static void rcdrom_stop_thread(void)
+{
+   rcdrom.thread_exit = 1;
+   if (rcdrom.buf_lock) {
+      slock_lock(rcdrom.buf_lock);
+      rcdrom.do_prefetch = 0;
+      if (rcdrom.cond)
+         scond_signal(rcdrom.cond);
+      slock_unlock(rcdrom.buf_lock);
+   }
+   if (rcdrom.thread) {
+      sthread_join(rcdrom.thread);
+      rcdrom.thread = NULL;
+   }
+   if (rcdrom.cond) { scond_free(rcdrom.cond); rcdrom.cond = NULL; }
+   if (rcdrom.buf_lock) { slock_free(rcdrom.buf_lock); rcdrom.buf_lock = NULL; }
+   if (rcdrom.read_lock) { slock_free(rcdrom.read_lock); rcdrom.read_lock = NULL; }
+   free(rcdrom.buf);
+   rcdrom.buf = NULL;
+}
+
+// the thread is optional, if anything fails we can do direct reads
+static void rcdrom_start_thread(void)
+{
+   rcdrom_stop_thread();
+   rcdrom.thread_exit = rcdrom.prefetch_lba = rcdrom.do_prefetch = 0;
+   if (rcdrom.buf_cnt == 0)
+      return;
+   rcdrom.buf = calloc(rcdrom.buf_cnt, sizeof(rcdrom.buf[0]));
+   rcdrom.buf_lock = slock_new();
+   rcdrom.read_lock = slock_new();
+   rcdrom.cond = scond_new();
+   if (rcdrom.buf && rcdrom.buf_lock && rcdrom.read_lock && rcdrom.cond) {
+      rcdrom.thread = sthread_create(rcdrom_prefetch_thread, NULL);
+      rcdrom.buf[0].lba = ~0;
+   }
+   if (!rcdrom.thread) {
+      LogErr("cdrom precache thread init failed.\n");
+      rcdrom_stop_thread();
+   }
+}
+
+static long CALLBACK rcdrom_open(void)
+{
+   const char *name = GetIsoFile();
+   //printf("%s %s\n", __func__, name);
+   rcdrom.h = retro_vfs_file_open_impl(name, RETRO_VFS_FILE_ACCESS_READ,
+      RETRO_VFS_FILE_ACCESS_HINT_NONE);
+   if (rcdrom.h) {
+      int ret = cdrom_set_read_speed_x(rcdrom.h, 4);
+      if (ret) LogErr("CD speed set failed\n");
+      const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
+      const cdrom_track_t *last = &toc->track[toc->num_tracks - 1];
+      unsigned int lba = cdrom_msf_to_lba(last->min, last->sec, last->frame) - 150;
+      rcdrom.total_lba = lba + last->track_size;
+      //cdrom_get_current_config_random_readable(rcdrom.h);
+      //cdrom_get_current_config_multiread(rcdrom.h);
+      //cdrom_get_current_config_cdread(rcdrom.h);
+      //cdrom_get_current_config_profiles(rcdrom.h);
+      rcdrom_start_thread();
+      return 0;
+   }
+   LogErr("retro_vfs_file_open failed for '%s'\n", name);
+   return -1;
+}
+
+static long CALLBACK rcdrom_close(void)
+{
+   //printf("%s\n", __func__);
+   if (rcdrom.h) {
+      rcdrom_stop_thread();
+      retro_vfs_file_close_impl(rcdrom.h);
+      rcdrom.h = NULL;
+   }
+   return 0;
+}
+
+static long CALLBACK rcdrom_getTN(unsigned char *tn)
+{
+   const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
+   tn[0] = 1;
+   tn[1] = toc->num_tracks;
+   //printf("%s -> %d %d\n", __func__, tn[0], tn[1]);
+   return 0;
+}
+
+static long CALLBACK rcdrom_getTD(unsigned char track, unsigned char *rt)
+{
+   const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
+   rt[0] = 0, rt[1] = 2, rt[2] = 0;
+   if (track == 0) {
+      cdrom_lba_to_msf(rcdrom.total_lba + 150, &rt[2], &rt[1], &rt[0]);
+   }
+   else if (track <= toc->num_tracks) {
+      int i = track - 1;
+      rt[2] = toc->track[i].min;
+      rt[1] = toc->track[i].sec;
+      rt[0] = toc->track[i].frame;
+   }
+   //printf("%s %d -> %d:%02d:%02d\n", __func__, track, rt[2], rt[1], rt[0]);
+   return 0;
+}
+
+static long CALLBACK rcdrom_prefetch(unsigned char m, unsigned char s, unsigned char f)
+{
+   unsigned int lba = cdrom_msf_to_lba(m, s, f) - 150;
+   if (rcdrom.cond && rcdrom.h) {
+      rcdrom.prefetch_lba = lba;
+      rcdrom.do_prefetch = 1;
+      scond_signal(rcdrom.cond);
+   }
+   if (rcdrom.buf) {
+     unsigned int c = rcdrom.buf_cnt;
+     if (c)
+        return rcdrom.buf[lba % c].lba == lba;
+   }
+   return 1;
+}
+
+static int rcdrom_read_msf(unsigned char m, unsigned char s, unsigned char f,
+      void *buf, const char *func)
+{
+   unsigned int lba = cdrom_msf_to_lba(m, s, f) - 150;
+   int hit = 0, ret = -1;
+   if (rcdrom.buf_lock)
+      hit = lbacache_get(lba, buf);
+   if (!hit && rcdrom.read_lock) {
+      // maybe still prefetching
+      slock_lock(rcdrom.read_lock);
+      slock_unlock(rcdrom.read_lock);
+      hit = lbacache_get(lba, buf);
+      if (hit)
+         hit = 2;
+   }
+   if (!hit) {
+      slock_t *lock = rcdrom.read_lock;
+      rcdrom.do_prefetch = 0;
+      if (lock)
+         slock_lock(lock);
+      if (rcdrom.h) {
+         ret = cdrom_read_sector(rcdrom.h, lba, buf);
+         if (ret)
+            LogErr("cdrom_read_sector failed for lba %d\n", lba);
+      }
+      if (lock)
+         slock_unlock(lock);
+   }
+   else
+      ret = 0;
+   rcdrom.check_eject_delay = ret ? 0 : 100;
+   //printf("%s %d:%02d:%02d -> %d hit %d\n", func, m, s, f, ret, hit);
+   return ret;
+}
+
+static boolean CALLBACK rcdrom_readTrack(unsigned char *time)
+{
+   unsigned char m = btoi(time[0]), s = btoi(time[1]), f = btoi(time[2]);
+   return !rcdrom_read_msf(m, s, f, ISOgetBuffer() - 12, __func__);
+}
+
+static long CALLBACK rcdrom_readCDDA(unsigned char m, unsigned char s, unsigned char f,
+      unsigned char *buffer)
+{
+   return rcdrom_read_msf(m, s, f, buffer, __func__);
+}
+
+static unsigned char * CALLBACK rcdrom_getBuffer(void)
+{
+   //printf("%s\n", __func__);
+   return ISOgetBuffer();
+}
+
+static unsigned char * CALLBACK rcdrom_getBufferSub(int sector)
+{
+   //printf("%s %d %d\n", __func__, sector, rcdrom_h->cdrom.last_frame_lba);
+   return NULL;
+}
+
+static long CALLBACK rcdrom_getStatus(struct CdrStat *stat)
+{
+   const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
+   //printf("%s %p\n", __func__, stat);
+   CDR__getStatus(stat);
+   stat->Type = toc->track[0].audio ? 2 : 1;
+   return 0;
+}
+
+static void rcdrom_check_eject(void)
+{
+   bool media_inserted;
+   if (!rcdrom.h || rcdrom.do_prefetch || rcdrom.check_eject_delay-- > 0)
+      return;
+   rcdrom.check_eject_delay = 100;
+   media_inserted = cdrom_is_media_inserted(rcdrom.h); // 1-2ms
+   if (!media_inserted != disk_ejected)
+      disk_set_eject_state(!media_inserted);
+}
+#endif // HAVE_CDROM
 
 #if defined(__QNX__) || defined(_WIN32)
 /* Blackberry QNX doesn't have strcasestr */
@@ -1742,6 +2064,26 @@ bool retro_load_game(const struct retro_game_info *info)
       LogErr("failed to load plugins\n");
       return false;
    }
+   if (!strncmp(info->path, "cdrom:", 6))
+   {
+#ifdef HAVE_CDROM
+      CDR_open = rcdrom_open;
+      CDR_close = rcdrom_close;
+      CDR_getTN = rcdrom_getTN;
+      CDR_getTD = rcdrom_getTD;
+      CDR_readTrack = rcdrom_readTrack;
+      CDR_getBuffer = rcdrom_getBuffer;
+      CDR_getBufferSub = rcdrom_getBufferSub;
+      CDR_getStatus = rcdrom_getStatus;
+      CDR_readCDDA = rcdrom_readCDDA;
+      CDR_prefetch = rcdrom_prefetch;
+#elif !defined(USE_LIBRETRO_VFS)
+      ReleasePlugins();
+      LogErr("%s\n", "Physical CD-ROM support is not compiled in.");
+      show_notification("Physical CD-ROM support is not compiled in.", 6000, 3);
+      return false;
+#endif
+   }
 
    plugins_opened = 1;
    NetOpened = 0;
@@ -1849,6 +2191,8 @@ bool retro_load_game(const struct retro_game_info *info)
 
    if (check_unsatisfied_libcrypt())
       show_notification("LibCrypt protected game with missing SBI detected", 3000, 3);
+   if (Config.TurboCD)
+      show_notification("TurboCD is ON", 700, 2);
 
    return true;
 }
@@ -1923,6 +2267,7 @@ static void update_variables(bool in_flight)
    int gpu_peops_fix = GPU_PEOPS_OLD_FRAME_SKIP;
 #endif
    frameskip_type_t prev_frameskip_type;
+   double old_fps = psxGetFps();
 
    var.value = NULL;
    var.key = "pcsx_rearmed_frameskip_type";
@@ -2129,6 +2474,36 @@ static void update_variables(bool in_flight)
       else if (strcmp(var.value, "enabled") == 0)
          display_internal_fps = true;
    }
+
+   var.value = NULL;
+   var.key = "pcsx_rearmed_cd_turbo";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "enabled") == 0)
+         Config.TurboCD = true;
+      else
+         Config.TurboCD = false;
+   }
+
+#ifdef HAVE_CDROM
+   var.value = NULL;
+   var.key = "pcsx_rearmed_phys_cd_readahead";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      long newval = strtol(var.value, NULL, 10);
+      bool changed = rcdrom.buf_cnt != newval;
+      if (rcdrom.h && changed)
+         rcdrom_stop_thread();
+      rcdrom.buf_cnt = newval;
+      if (rcdrom.h && changed) {
+         rcdrom_start_thread();
+         if (rcdrom.cond && rcdrom.prefetch_lba) {
+            rcdrom.do_prefetch = 1;
+            scond_signal(rcdrom.cond);
+         }
+      }
+   }
+#endif
 
    //
    // CPU emulation related config
@@ -2342,6 +2717,18 @@ static void update_variables(bool in_flight)
          Config.GpuListWalking = 1;
       else // auto
          Config.GpuListWalking = -1;
+   }
+
+   var.value = NULL;
+   var.key = "pcsx_rearmed_fractional_framerate";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         Config.FractionalFramerate = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         Config.FractionalFramerate = 1;
+      else // auto
+         Config.FractionalFramerate = -1;
    }
 
    var.value = NULL;
@@ -2643,6 +3030,13 @@ static void update_variables(bool in_flight)
    }
 
    update_option_visibility();
+
+   if (in_flight && old_fps != psxGetFps())
+   {
+      struct retro_system_av_info info;
+      retro_get_system_av_info(&info);
+      environ_cb(RETRO_ENVIRONMENT_SET_SYSTEM_AV_INFO, &info);
+   }
 }
 
 // Taken from beetle-psx-libretro
@@ -3095,6 +3489,11 @@ void retro_run(void)
    video_cb((vout_fb_dirty || !vout_can_dupe) ? vout_buf_ptr : NULL,
        vout_width, vout_height, vout_pitch * 2);
    vout_fb_dirty = 0;
+
+#ifdef HAVE_CDROM
+   if (CDR_open == rcdrom_open)
+      rcdrom_check_eject();
+#endif
 }
 
 static bool try_use_bios(const char *path, bool preferred_only)

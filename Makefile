@@ -72,23 +72,24 @@ ifeq ($(DEBUG), 1)
 endif
 
 ifeq ($(WANT_ZLIB),1)
-CFLAGS += -Ideps/libchdr/deps/zlib-1.2.13
-OBJS += deps/libchdr/deps/zlib-1.2.13/adler32.o \
-        deps/libchdr/deps/zlib-1.2.13/compress.o \
-        deps/libchdr/deps/zlib-1.2.13/crc32.o \
-        deps/libchdr/deps/zlib-1.2.13/deflate.o \
-        deps/libchdr/deps/zlib-1.2.13/gzclose.o \
-        deps/libchdr/deps/zlib-1.2.13/gzlib.o \
-        deps/libchdr/deps/zlib-1.2.13/gzread.o \
-        deps/libchdr/deps/zlib-1.2.13/gzwrite.o \
-        deps/libchdr/deps/zlib-1.2.13/infback.o \
-        deps/libchdr/deps/zlib-1.2.13/inffast.o \
-        deps/libchdr/deps/zlib-1.2.13/inflate.o \
-        deps/libchdr/deps/zlib-1.2.13/inftrees.o \
-        deps/libchdr/deps/zlib-1.2.13/trees.o \
-        deps/libchdr/deps/zlib-1.2.13/uncompr.o \
-        deps/libchdr/deps/zlib-1.2.13/zutil.o
-deps/libchdr/deps/zlib-1.2.13/%.o: CFLAGS += -DHAVE_UNISTD_H
+ZLIB_DIR = deps/libchdr/deps/zlib-1.3.1
+CFLAGS += -I$(ZLIB_DIR)
+OBJS += $(ZLIB_DIR)/adler32.o \
+        $(ZLIB_DIR)/compress.o \
+        $(ZLIB_DIR)/crc32.o \
+        $(ZLIB_DIR)/deflate.o \
+        $(ZLIB_DIR)/gzclose.o \
+        $(ZLIB_DIR)/gzlib.o \
+        $(ZLIB_DIR)/gzread.o \
+        $(ZLIB_DIR)/gzwrite.o \
+        $(ZLIB_DIR)/infback.o \
+        $(ZLIB_DIR)/inffast.o \
+        $(ZLIB_DIR)/inflate.o \
+        $(ZLIB_DIR)/inftrees.o \
+        $(ZLIB_DIR)/trees.o \
+        $(ZLIB_DIR)/uncompr.o \
+        $(ZLIB_DIR)/zutil.o
+$(ZLIB_DIR)/%.o: CFLAGS += -DHAVE_UNISTD_H
 endif
 ifeq "$(ARCH)" "arm"
 OBJS += libpcsxcore/gte_arm.o
@@ -105,7 +106,9 @@ CFLAGS += -Ideps/lightning/include -Ideps/lightrec -Iinclude/lightning -Iinclude
 LIGHTREC_CUSTOM_MAP ?= 0
 LIGHTREC_CUSTOM_MAP_OBJ ?= libpcsxcore/lightrec/mem.o
 LIGHTREC_THREADED_COMPILER ?= 0
+LIGHTREC_CODE_INV ?= 0
 CFLAGS += -DLIGHTREC_CUSTOM_MAP=$(LIGHTREC_CUSTOM_MAP) \
+	  -DLIGHTREC_CODE_INV=$(LIGHTREC_CODE_INV) \
 	  -DLIGHTREC_ENABLE_THREADED_COMPILER=$(LIGHTREC_THREADED_COMPILER)
 ifeq ($(LIGHTREC_CUSTOM_MAP),1)
 LDLIBS += -lrt
@@ -119,8 +122,7 @@ OBJS += deps/lightrec/recompiler.o \
 	deps/lightrec/reaper.o
 endif
 OBJS += deps/lightrec/tlsf/tlsf.o
-OBJS += libpcsxcore/lightrec/plugin.o \
-	libpcsxcore/lightrec/internals.o
+OBJS += libpcsxcore/lightrec/plugin.o
 OBJS += deps/lightning/lib/jit_disasm.o \
 		deps/lightning/lib/jit_memory.o \
 		deps/lightning/lib/jit_names.o \
@@ -138,8 +140,8 @@ OBJS += deps/lightning/lib/jit_disasm.o \
 		deps/lightrec/optimizer.o \
 		deps/lightrec/regcache.o
 deps/lightning/%.o: CFLAGS += -DHAVE_MMAP=P_HAVE_MMAP
-deps/lightning/%: CFLAGS += -w
-deps/lightrec/%: CFLAGS += -w
+deps/lightning/%: CFLAGS += -Wno-uninitialized
+deps/lightrec/%: CFLAGS += -Wno-uninitialized
 libpcsxcore/lightrec/mem.o: CFLAGS += -D_GNU_SOURCE
 ifeq ($(MMAP_WIN32),1)
 CFLAGS += -Iinclude/mman -I deps/mman
@@ -254,25 +256,39 @@ OBJS += plugins/cdrcimg/cdrcimg.o
 
 # libchdr
 ifeq "$(HAVE_CHD)" "1"
-CFLAGS += -Ideps/libchdr/include
-CFLAGS += -Ideps/libchdr/include/libchdr
-OBJS += deps/libchdr/deps/lzma-19.00/src/Alloc.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/Bra86.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/BraIA64.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/CpuArch.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/Delta.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/LzFind.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/Lzma86Dec.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/LzmaDec.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/LzmaEnc.o
-OBJS += deps/libchdr/deps/lzma-19.00/src/Sort.o
-OBJS += deps/libchdr/src/libchdr_bitstream.o
-OBJS += deps/libchdr/src/libchdr_cdrom.o
-OBJS += deps/libchdr/src/libchdr_chd.o
-OBJS += deps/libchdr/src/libchdr_flac.o
-OBJS += deps/libchdr/src/libchdr_huffman.o
-CFLAGS += -Ideps/libchdr/deps/lzma-19.00/include
-CFLAGS += -DHAVE_CHD -D_7ZIP_ST
+LCHDR = deps/libchdr
+LCHDR_LZMA = $(LCHDR)/deps/lzma-24.05
+LCHDR_ZSTD = $(LCHDR)/deps/zstd-1.5.6/lib
+OBJS += $(LCHDR)/src/libchdr_bitstream.o
+OBJS += $(LCHDR)/src/libchdr_cdrom.o
+OBJS += $(LCHDR)/src/libchdr_chd.o
+OBJS += $(LCHDR)/src/libchdr_flac.o
+OBJS += $(LCHDR)/src/libchdr_huffman.o
+$(LCHDR)/src/%.o: CFLAGS += -Wno-unused -std=gnu11
+OBJS += $(LCHDR_LZMA)/src/Alloc.o
+OBJS += $(LCHDR_LZMA)/src/CpuArch.o
+OBJS += $(LCHDR_LZMA)/src/Delta.o
+OBJS += $(LCHDR_LZMA)/src/LzFind.o
+OBJS += $(LCHDR_LZMA)/src/LzmaDec.o
+OBJS += $(LCHDR_LZMA)/src/LzmaEnc.o
+OBJS += $(LCHDR_LZMA)/src/Sort.o
+$(LCHDR_LZMA)/src/%.o: CFLAGS += -Wno-unused -DZ7_ST -I$(LCHDR_LZMA)/include
+$(LCHDR)/src/%.o: CFLAGS += -I$(LCHDR_LZMA)/include
+OBJS += $(LCHDR_ZSTD)/common/entropy_common.o
+OBJS += $(LCHDR_ZSTD)/common/error_private.o
+OBJS += $(LCHDR_ZSTD)/common/fse_decompress.o
+OBJS += $(LCHDR_ZSTD)/common/xxhash.o
+OBJS += $(LCHDR_ZSTD)/common/zstd_common.o
+OBJS += $(LCHDR_ZSTD)/decompress/huf_decompress.o
+OBJS += $(LCHDR_ZSTD)/decompress/huf_decompress_amd64.o
+OBJS += $(LCHDR_ZSTD)/decompress/zstd_ddict.o
+OBJS += $(LCHDR_ZSTD)/decompress/zstd_decompress_block.o
+OBJS += $(LCHDR_ZSTD)/decompress/zstd_decompress.o
+$(LCHDR_ZSTD)/common/%.o \
+$(LCHDR_ZSTD)/decompress/%.o: CFLAGS += -I$(LCHDR_ZSTD)
+$(LCHDR)/src/%.o: CFLAGS += -I$(LCHDR_ZSTD)
+libpcsxcore/cdriso.o: CFLAGS += -Wno-unused-function
+CFLAGS += -DHAVE_CHD -I$(LCHDR)/include
 LDFLAGS += -lm
 endif
 
@@ -336,17 +352,27 @@ CFLAGS += `pkg-config --cflags glib-2.0 libosso dbus-1 hildon-fm-2`
 LDFLAGS += `pkg-config --libs glib-2.0 libosso dbus-1 hildon-fm-2`
 endif
 ifeq "$(PLATFORM)" "libretro"
+ifneq "$(HAVE_PHYSICAL_CDROM)$(USE_LIBRETRO_VFS)" "00"
+OBJS += deps/libretro-common/compat/compat_strl.o
+OBJS += deps/libretro-common/file/file_path.o
+OBJS += deps/libretro-common/string/stdstring.o
+OBJS += deps/libretro-common/vfs/vfs_implementation.o
+endif
+ifeq "$(HAVE_PHYSICAL_CDROM)" "1"
+OBJS += frontend/libretro-cdrom.o
+OBJS += deps/libretro-common/lists/string_list.o
+OBJS += deps/libretro-common/memmap/memalign.o
+OBJS += deps/libretro-common/rthreads/rthreads.o
+OBJS += deps/libretro-common/vfs/vfs_implementation_cdrom.o
+CFLAGS += -DHAVE_CDROM
+endif
 ifeq "$(USE_LIBRETRO_VFS)" "1"
 OBJS += deps/libretro-common/compat/compat_posix_string.o
 OBJS += deps/libretro-common/compat/fopen_utf8.o
-OBJS += deps/libretro-common/compat/compat_strl.o
 OBJS += deps/libretro-common/encodings/encoding_utf.o
-OBJS += deps/libretro-common/file/file_path.o
 OBJS += deps/libretro-common/streams/file_stream.o
 OBJS += deps/libretro-common/streams/file_stream_transforms.o
-OBJS += deps/libretro-common/string/stdstring.o
 OBJS += deps/libretro-common/time/rtime.o
-OBJS += deps/libretro-common/vfs/vfs_implementation.o
 CFLAGS += -DUSE_LIBRETRO_VFS
 endif
 OBJS += frontend/libretro.o

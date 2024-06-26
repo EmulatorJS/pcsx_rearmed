@@ -65,6 +65,22 @@ static const char * const dualshock_init_analog_hack_db[] =
 	"SLUS00546",
 };
 
+static const char * const fractional_Framerate_hack_db[] =
+{
+	/* Dance Dance Revolution */
+	"SLPM86503", // 3rd Mix
+	"SLPM86752", // 4th Mix
+	"SLPM86266", // 4thMix: The Beat Goes On
+	"SLPM86831", // Extra Mix
+	"SLUS01446", // Konamix
+	/* Dancing Stage Fever */
+	"SLES04097",
+	/* Dancing Stage Fusion */
+	"SLES04163",
+	/* Spyro 2 */
+	"SCUS94425", "SCES02104",
+};
+
 #define HACK_ENTRY(var, list) \
 	{ #var, &Config.hacks.var, list, ARRAY_SIZE(list) }
 
@@ -82,6 +98,7 @@ hack_db[] =
 	HACK_ENTRY(gpu_centering, gpu_centering_hack_db),
 	HACK_ENTRY(gpu_timing1024, dualshock_timing1024_hack_db),
 	HACK_ENTRY(dualshock_init_analog, dualshock_init_analog_hack_db),
+	HACK_ENTRY(fractional_Framerate, fractional_Framerate_hack_db),
 };
 
 static const struct
@@ -97,6 +114,8 @@ cycle_multiplier_overrides[] =
 	/* Super Robot Taisen Alpha - on the edge with 175,
 	 * changing memcard settings is enough to break/unbreak it */
 	{ 190, { "SLPS02528", "SLPS02636" } },
+	/* Colin McRae Rally - language selection menu does not work with 175 */
+	{ 174, { "SLES00477" } },
 	/* Brave Fencer Musashi - cd sectors arrive too fast */
 	{ 170, { "SLUS00726", "SLPS01490" } },
 #if defined(DRC_DISABLE) || defined(LIGHTREC) /* new_dynarec has a hack for this game */
@@ -107,6 +126,8 @@ cycle_multiplier_overrides[] =
 	{ 222, { "SLES01549", "SLES02063", "SLES02064" } },
 	/* Digimon World */
 	{ 153, { "SLUS01032", "SLES02914" } },
+	/* Power Rangers: Lightspeed Rescue - jump does not work with 175 */
+	{ 222, { "SLUS01114", "SLES03286" } },
 	/* Syphon Filter - reportedly hangs under unknown conditions */
 	{ 169, { "SCUS94240" } },
 	/* Psychic Detective - some weird race condition in the game's cdrom code */

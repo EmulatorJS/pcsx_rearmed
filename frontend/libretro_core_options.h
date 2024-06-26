@@ -97,13 +97,11 @@ struct retro_core_option_v2_category option_cats_us[] = {
       "Compatibility Fixes",
       "Configure settings/workarounds required for correct operation of specific games."
    },
-#if !defined(DRC_DISABLE) && !defined(LIGHTREC)
    {
       "speed_hack",
       "Speed Hacks (Advanced)",
       "Configure hacks that may improve performance at the expense of decreased accuracy/stability."
    },
-#endif
    { NULL, NULL, NULL },
 };
 
@@ -182,6 +180,25 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "sync",
    },
 #endif
+#ifdef HAVE_CDROM
+#define V(x) { #x, NULL }
+   {
+      "pcsx_rearmed_phys_cd_readahead",
+      "Physical CD read-ahead",
+      NULL,
+      "(Hardware CD-ROM only) Reads the specified amount of sectors ahead of time to try to avoid later stalls. 333000 will try to read the complete disk (requires an additional 750MB of RAM).",
+      NULL,
+      "system",
+      {
+         V(0),  V(1),  V(2),  V(3),  V(4),  V(5),  V(6),  V(7),
+         V(8),  V(9),  V(10), V(11), V(12), V(13), V(14), V(15),
+         V(16), V(32), V(64), V(128), V(256), V(512), V(1024), V(333000),
+         { NULL, NULL},
+      },
+      "12",
+   },
+#undef V
+#endif
 #ifndef DRC_DISABLE
    {
       "pcsx_rearmed_drc",
@@ -200,9 +217,9 @@ struct retro_core_option_v2_definition option_defs_us[] = {
 #endif
    {
       "pcsx_rearmed_psxclock",
-      "PSX CPU Clock Speed",
+      "PSX CPU Clock Speed (%)",
       NULL,
-      "Overclock or under-clock the PSX CPU. Try adjusting this if the game is too slow, too fast or hangs."
+      "Overclock or under-clock the PSX CPU. The value has to be lower than 100 because of some slowdowns (cache misses, hw access penalties, etc.) that are not emulated. Try adjusting this if the game is too slow, too fast or hangs."
 #if defined(HAVE_PRE_ARMV7) && !defined(_3DS)
       " Default is 50."
 #else
@@ -407,6 +424,21 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "disabled",
    },
    {
+      "pcsx_rearmed_fractional_framerate",
+      "Use fractional frame rate",
+      NULL,
+      "Instead of the exact 50 or 60 (maximum) fps for PAL/NTSC the real console runs closer to something like 49.75 and 59.81fps (varies slightly between hw versions). PCSX-ReARMed uses the former \"round\" framerates to better match modern displays, however that may cause audio/video desync in games like DDR and Spyro 2 (intro). With this option you can try to use fractional framerates.",
+      NULL,
+      "video",
+      {
+         { "auto", "Auto" },
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "auto",
+   },
+   {
       "pcsx_rearmed_gpu_slow_llists",
       "(GPU) Slow linked list processing",
       NULL,
@@ -414,7 +446,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       NULL,
       "video",
       {
-         { "auto", NULL },
+         { "auto", "Auto" },
          { "disabled", NULL },
          { "enabled",  NULL },
          { NULL, NULL },
@@ -1538,6 +1570,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       },
       "disabled",
    },
+   {
+      "pcsx_rearmed_cd_turbo",
+      "Turbo CD",
+      NULL,
+      "This makes the emulated CD-ROM extremely fast and can reduce loading times in some cases. Warning: many games were not programmed to handle such a speed. The game (or even the emulator) MAY CRASH at ANY TIME if this is enabled.",
+      NULL,
+      "speed_hack",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled",
+   },
 #if !defined(DRC_DISABLE) && !defined(LIGHTREC)
    {
       "pcsx_rearmed_nocompathacks",
@@ -1600,13 +1646,13 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "pcsx_rearmed_nostalls",
       "Disable CPU/GTE Stalls",
       NULL,
-      "Will cause some games to run too quickly."
+      "Will cause some games to run too quickly. Should be disabled in almost all cases."
 #if defined(LIGHTREC)
       " Interpreter only."
 #endif
       ,
       NULL,
-      "compat_hack",
+      "speed_hack",
       {
          { "disabled", NULL },
          { "enabled",  NULL },

@@ -4,6 +4,7 @@ EMULATORJS_THREADS ?= 0
 DEBUG ?= 0
 WANT_ZLIB ?= 1
 HAVE_CHD ?= 1
+HAVE_PHYSICAL_CDROM ?= 1
 USE_LIBRETRO_VFS ?= 0
 
 # Dynarec options: lightrec, ari64
@@ -174,6 +175,7 @@ else ifeq ($(platform), osx)
 	CFLAGS  += $(ARCHFLAGS)
 	CXXFLAGS  += $(ARCHFLAGS)
 	LDFLAGS += $(ARCHFLAGS)
+	HAVE_PHYSICAL_CDROM = 0
 
 # iOS
 else ifneq (,$(findstring ios,$(platform)))
@@ -203,6 +205,7 @@ else
 	CFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
 	ASFLAGS += -mcpu=cortex-a8 -mtune=cortex-a8 -mfpu=neon
 endif
+	HAVE_PHYSICAL_CDROM = 0
 	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
 ifeq ($(platform),$(filter $(platform),ios9 ios-arm64))
 	MINVERSION = -miphoneos-version-min=8.0
@@ -229,6 +232,7 @@ endif
 	BUILTIN_GPU = neon
 	HAVE_NEON = 1
 	DYNAREC = 0
+	HAVE_PHYSICAL_CDROM = 0
 	CC_AS = perl ./tools/gas-preprocessor.pl $(CC)
 
 # Nintendo Switch (libnx)
@@ -251,6 +255,7 @@ else ifeq ($(platform), libnx)
    BUILTIN_GPU = neon
    HAVE_NEON = 1
    DYNAREC = ari64
+   HAVE_PHYSICAL_CDROM = 0
 
 # Lakka Switch (arm64)
 else ifeq ($(platform), arm64)
@@ -259,6 +264,7 @@ else ifeq ($(platform), arm64)
    BUILTIN_GPU = neon
    HAVE_NEON = 1
    DYNAREC = ari64
+   HAVE_PHYSICAL_CDROM = 0
    fpic := -fPIC
    CFLAGS := $(filter-out -O2, $(CFLAGS))
    CFLAGS += -O3 -ftree-vectorize
@@ -275,11 +281,13 @@ else ifeq ($(platform), psl1ght)
 	LIBPTHREAD :=
 	LIBDL :=
 	NEED_SYSCONF := 1
+	HAVE_PHYSICAL_CDROM = 0
 
 # PSP
 else ifeq ($(platform), psp1)
 	TARGET := $(TARGET_NAME)_libretro_psp1.a
 	CFLAGS += -DPSP -G0
+	HAVE_PHYSICAL_CDROM = 0
 
 # Vita
 else ifeq ($(platform), vita)
@@ -303,6 +311,7 @@ else ifeq ($(platform), vita)
 	STATIC_LINKING = 1
 	NO_PTHREAD=1
 	NO_POSIX_MEMALIGN := 1
+	HAVE_PHYSICAL_CDROM = 0
 
 # CTR(3DS)
 else ifeq ($(platform), ctr)
@@ -314,6 +323,7 @@ else ifeq ($(platform), ctr)
 	CFLAGS += -Ifrontend/3ds -I$(CTRULIB)/include
 	CFLAGS += -Werror=implicit-function-declaration
 	CFLAGS += -DHAVE_UNISTD_H
+	CFLAGS += -DZ7_DECL_Int32_AS_long
 
 	OBJS += frontend/3ds/utils.o
 
@@ -325,11 +335,13 @@ else ifeq ($(platform), ctr)
 	HAVE_NEON = 0
 	STATIC_LINKING = 1
 	NO_POSIX_MEMALIGN := 1
+	HAVE_PHYSICAL_CDROM = 0
 
 # Xbox 360
 else ifeq ($(platform), xenon)
 	TARGET := $(TARGET_NAME)_libretro_xenon360.a
 	CFLAGS += -D__LIBXENON__ -m32 -D__ppc__
+	HAVE_PHYSICAL_CDROM = 0
 
 # Nintendo GC/Wii/WiiU
 else ifneq (,$(filter $(platform),ngc wii wiiu))
@@ -344,8 +356,10 @@ else ifneq (,$(filter $(platform),ngc wii wiiu))
 		# -mwup was removed in newer devkitPPC versions
 		CFLAGS += -DHW_WUP
 		CFLAGS += -I frontend/wiiu
+		CFLAGS += -DZ7_DECL_Int32_AS_long
 		LIGHTREC_CUSTOM_MAP := 1
 		LIGHTREC_CUSTOM_MAP_OBJ := libpcsxcore/lightrec/mem_wiiu.o
+		LIGHTREC_CODE_INV := 1
 	endif
 	ARCH = powerpc
 	BUILTIN_GPU = peops
@@ -360,6 +374,7 @@ else ifneq (,$(filter $(platform),ngc wii wiiu))
 	LIBDL :=
 	LIBPTHREAD :=
 	LIBRT :=
+	HAVE_PHYSICAL_CDROM = 0
 
 # QNX
 else ifeq ($(platform), qnx)
@@ -376,6 +391,7 @@ else ifeq ($(platform), qnx)
 	LIBPTHREAD :=
 	LIBDL :=
 	LIBM :=
+	HAVE_PHYSICAL_CDROM = 0
 
 #Raspberry Pi 1
 else ifeq ($(platform), rpi1)
@@ -560,7 +576,7 @@ else ifeq ($(platform), emscripten)
    NO_MMAP = 1
    NO_PTHREAD=1
    STATIC_LINKING = 1
-   
+   HAVE_PHYSICAL_CDROM = 0
 
 # Windows
 else

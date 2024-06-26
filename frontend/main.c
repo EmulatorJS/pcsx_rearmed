@@ -138,6 +138,7 @@ void emu_set_default_config(void)
 	Config.PsxAuto = 1;
 	Config.cycle_multiplier = CYCLE_MULT_DEFAULT;
 	Config.GpuListWalking = -1;
+	Config.FractionalFramerate = -1;
 
 	pl_rearmed_cbs.gpu_neon.allow_interlace = 2; // auto
 	pl_rearmed_cbs.gpu_neon.enhancement_enable =
@@ -418,6 +419,8 @@ void emu_on_new_cd(int show_hud_msg)
 		SysPrintf("note: running with HLE BIOS, expect compatibility problems\n");
 		SysPrintf("----------------------------------------------------------\n");
 	}
+	if (Config.TurboCD)
+		SysPrintf("note: TurboCD is enabled, this breaks games\n");
 
 	if (show_hud_msg) {
 		if (check_unsatisfied_libcrypt())

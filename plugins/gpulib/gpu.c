@@ -576,6 +576,10 @@ static noinline int do_cmd_list_skip(uint32_t *data, int count, int *last_cmd)
     uint32_t *list = data + pos;
     cmd = LE32TOH(list[0]) >> 24;
     len = 1 + cmd_lengths[cmd];
+    if (pos + len > count) {
+      cmd = -1;
+      break; // incomplete cmd
+    }
 
     switch (cmd) {
       case 0x02:
@@ -614,11 +618,6 @@ static noinline int do_cmd_list_skip(uint32_t *data, int count, int *last_cmd)
         if ((cmd & 0xf8) == 0xe0)
           gpu.ex_regs[cmd & 7] = LE32TOH(list[0]);
         break;
-    }
-
-    if (pos + len > count) {
-      cmd = -1;
-      break; // incomplete cmd
     }
     if (0x80 <= cmd && cmd <= 0xdf)
       break; // image i/o
@@ -973,8 +972,8 @@ void GPUrearmedCallbacks(const struct rearmed_cbs *cbs)
   gpu.frameskip.dirty = (void *)&cbs->fskip_dirty;
   gpu.frameskip.active = 0;
   gpu.frameskip.frame_ready = 1;
-  gpu.state.hcnt = cbs->gpu_hcnt;
-  gpu.state.frame_count = cbs->gpu_frame_count;
+  gpu.state.hcnt = (uint32_t *)cbs->gpu_hcnt;
+  gpu.state.frame_count = (uint32_t *)cbs->gpu_frame_count;
   gpu.state.allow_interlace = cbs->gpu_neon.allow_interlace;
   gpu.state.enhancement_enable = cbs->gpu_neon.enhancement_enable;
   gpu.state.screen_centering_type_default = cbs->screen_centering_type_default;

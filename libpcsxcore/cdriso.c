@@ -28,7 +28,7 @@
 #include <errno.h>
 #include <zlib.h>
 #ifdef HAVE_CHD
-#include <chd.h>
+#include <libchdr/chd.h>
 #endif
 
 #ifdef _WIN32
@@ -115,6 +115,7 @@ long CALLBACK CDR__configure(void);
 long CALLBACK CDR__test(void);
 void CALLBACK CDR__about(void);
 long CALLBACK CDR__setfilename(char *filename);
+long CALLBACK CDR__prefetch(u8 m, u8 s, u8 f);
 
 static void DecodeRawSubData(void);
 
@@ -1587,7 +1588,7 @@ static unsigned char * CALLBACK ISOgetBuffer_async(void) {
 }
 #endif
 
-static unsigned char * CALLBACK ISOgetBuffer(void) {
+unsigned char * CALLBACK ISOgetBuffer(void) {
 	return cdbuffer + 12;
 }
 
@@ -2006,6 +2007,7 @@ void cdrIsoInit(void) {
 	CDR_test = CDR__test;
 	CDR_about = CDR__about;
 	CDR_setfilename = CDR__setfilename;
+	CDR_prefetch = CDR__prefetch;
 
 	numtracks = 0;
 }

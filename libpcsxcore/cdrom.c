@@ -68,7 +68,7 @@ static struct {
 	} subq;
 	unsigned char TrackChanged;
 	unsigned char ReportDelay;
-	unsigned char unused3;
+	unsigned char PhysCdPropagations;
 	unsigned short sectorsRead;
 	unsigned int  freeze_ver;
 
@@ -111,7 +111,7 @@ static struct {
 	u8 AdpcmActive;
 	u32 LastReadSeekCycles;
 
-	u8 unused7;
+	u8 RetryDetected;
 
 	u8 DriveState; // enum drive_state
 	u8 FastForward;
@@ -232,7 +232,7 @@ enum drive_state {
 	DRIVESTATE_SEEK,
 };
 
-static struct CdrStat stat;
+static struct CdrStat cdr_stat;
 
 static unsigned int msf2sec(const u8 *msf) {
 	return ((msf[0] * 60 + msf[1]) * 75) + msf[2];
@@ -327,10 +327,10 @@ void cdrLidSeekInterrupt(void)
 		//StopReading();
 		SetPlaySeekRead(cdr.StatP, 0);
 
-		if (CDR_getStatus(&stat) == -1)
+		if (CDR_getStatus(&cdr_stat) == -1)
 			return;
 
-		if (stat.Status & STATUS_SHELLOPEN)
+		if (cdr_stat.Status & STATUS_SHELLOPEN)
 		{
 			memset(cdr.Prev, 0xff, sizeof(cdr.Prev));
 			cdr.DriveState = DRIVESTATE_LID_OPEN;
@@ -339,8 +339,8 @@ void cdrLidSeekInterrupt(void)
 		break;
 
 	case DRIVESTATE_LID_OPEN:
-		if (CDR_getStatus(&stat) == -1)
-			stat.Status &= ~STATUS_SHELLOPEN;
+		if (CDR_getStatus(&cdr_stat) == -1)
+			cdr_stat.Status &= ~STATUS_SHELLOPEN;
 
 		// 02, 12, 10
 		if (!(cdr.StatP & STATUS_SHELLOPEN)) {
@@ -367,7 +367,7 @@ void cdrLidSeekInterrupt(void)
 		else if (cdr.StatP & STATUS_ROTATING) {
 			cdr.StatP &= ~STATUS_ROTATING;
 		}
-		else if (!(stat.Status & STATUS_SHELLOPEN)) {
+		else if (!(cdr_stat.Status & STATUS_SHELLOPEN)) {
 			// closed now
 			CheckCdrom();
 
@@ -576,6 +576,14 @@ static void cdrPlayInterrupt_Autopause()
 		cdr.ReportDelay--;
 }
 
+static boolean canDoTurbo(void)
+{
+	u32 c = psxRegs.cycle;
+	return Config.TurboCD && !cdr.RetryDetected && !cdr.AdpcmActive
+		//&& c - psxRegs.intCycle[PSXINT_SPUDMA].sCycle > (u32)cdReadTime * 2
+		&& c - psxRegs.intCycle[PSXINT_MDECOUTDMA].sCycle > (u32)cdReadTime * 16;
+}
+
 static int cdrSeekTime(unsigned char *target)
 {
 	int diff = msf2sec(cdr.SetSectorPlay) - msf2sec(target);
@@ -583,19 +591,15 @@ static int cdrSeekTime(unsigned char *target)
 	int cyclesSinceRS = psxRegs.cycle - cdr.LastReadSeekCycles;
 	seekTime = MAX_VALUE(seekTime, 20000);
 
-	// need this stupidly long penalty or else Spyro2 intro desyncs
-	// note: if misapplied this breaks MGS cutscenes among other things
-	if (cdr.DriveState == DRIVESTATE_PAUSED && cyclesSinceRS > cdReadTime * 50)
-		seekTime += cdReadTime * 25;
 	// Transformers Beast Wars Transmetals does Setloc(x),SeekL,Setloc(x),ReadN
 	// and then wants some slack time
-	else if (cdr.DriveState == DRIVESTATE_PAUSED || cyclesSinceRS < cdReadTime *3/2)
+	if (cdr.DriveState == DRIVESTATE_PAUSED || cyclesSinceRS < cdReadTime *3/2)
 		seekTime += cdReadTime;
 
 	seekTime = MIN_VALUE(seekTime, PSXCLK * 2 / 3);
-	CDR_LOG("seek: %.2f %.2f (%.2f) st %d\n", (float)seekTime / PSXCLK,
+	CDR_LOG("seek: %.2f %.2f (%.2f) st %d di %d\n", (float)seekTime / PSXCLK,
 		(float)seekTime / cdReadTime, (float)cyclesSinceRS / cdReadTime,
-		cdr.DriveState);
+		cdr.DriveState, diff);
 	return seekTime;
 }
 
@@ -658,8 +662,21 @@ static void msfiSub(u8 *msfi, u32 count)
 	}
 }
 
+static int msfiEq(const u8 *a, const u8 *b)
+{
+	return a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+}
+
 void cdrPlayReadInterrupt(void)
 {
+	int hit = CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
+	if (!hit && cdr.PhysCdPropagations++ < 222) {
+		// this propagates real cdrom delays to the emulated game
+		CDRPLAYREAD_INT(cdReadTime / 2, 0);
+		return;
+	}
+	cdr.PhysCdPropagations = 0;
+
 	cdr.LastReadSeekCycles = psxRegs.cycle;
 
 	if (cdr.Reading) {
@@ -694,6 +711,7 @@ void cdrPlayReadInterrupt(void)
 	}
 
 	msfiAdd(cdr.SetSectorPlay, 1);
+	CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
 
 	// update for CdlGetlocP/autopause
 	generate_subq(cdr.SetSectorPlay);
@@ -703,8 +721,8 @@ void cdrPlayReadInterrupt(void)
 
 static void softReset(void)
 {
-	CDR_getStatus(&stat);
-	if (stat.Status & STATUS_SHELLOPEN) {
+	CDR_getStatus(&cdr_stat);
+	if (cdr_stat.Status & STATUS_SHELLOPEN) {
 		cdr.DriveState = DRIVESTATE_LID_OPEN;
 		cdr.StatP = STATUS_SHELLOPEN;
 	}
@@ -817,6 +835,9 @@ void cdrInterrupt(void) {
 			{
 				for (i = 0; i < 3; i++)
 					set_loc[i] = btoi(cdr.Param[i]);
+				cdr.RetryDetected = msfiEq(cdr.SetSector, set_loc)
+					&& !cdr.SetlocPending;
+				//cdr.RetryDetected |= msfiEq(cdr.Param, cdr.Transfer);
 				memcpy(cdr.SetSector, set_loc, 3);
 				cdr.SetSector[3] = 0;
 				cdr.SetlocPending = 1;
@@ -966,27 +987,19 @@ void cdrInterrupt(void) {
 			cdr.sectorsRead = 0;
 
 			/*
-			Gundam Battle Assault 2: much slower (*)
-			- Fixes boot, gameplay
-
-			Hokuto no Ken 2: slower
-			- Fixes intro + subtitles
-
-			InuYasha - Feudal Fairy Tale: slower
-			- Fixes battles
+			Gundam Battle Assault 2
+			Hokuto no Ken 2
+			InuYasha - Feudal Fairy Tale
+			Dance Dance Revolution Konamix
+			...
 			*/
-			/* Gameblabla - Tightening the timings (as taken from Duckstation). 
-			 * The timings from Duckstation are based upon hardware tests.
-			 * Mednafen's timing don't work for Gundam Battle Assault 2 in PAL/50hz mode,
-			 * seems to be timing sensitive as it can depend on the CPU's clock speed.
-			 * */
 			if (!(cdr.StatP & (STATUS_PLAY | STATUS_READ)))
 			{
 				second_resp_time = 7000;
 			}
 			else
 			{
-				second_resp_time = (((cdr.Mode & MODE_SPEED) ? 1 : 2) * 1097107);
+				second_resp_time = 2 * 1097107;
 			}
 			SetPlaySeekRead(cdr.StatP, 0);
 			DriveStateOld = cdr.DriveState;
@@ -1106,9 +1119,12 @@ void cdrInterrupt(void) {
 			StopReading();
 			SetPlaySeekRead(cdr.StatP, STATUS_SEEK | STATUS_ROTATING);
 
-			seekTime = cdrSeekTime(cdr.SetSector);
+			if (!canDoTurbo())
+				seekTime = cdrSeekTime(cdr.SetSector);
 			memcpy(cdr.SetSectorPlay, cdr.SetSector, 4);
 			cdr.DriveState = DRIVESTATE_SEEK;
+			CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1],
+					cdr.SetSectorPlay[2]);
 			/*
 			Crusaders of Might and Magic = 0.5x-4x
 			- fix cutscene speech start
@@ -1172,11 +1188,11 @@ void cdrInterrupt(void) {
 			cdr.Result[3] = 0;
 
 			// 0x10 - audio | 0x40 - disk missing | 0x80 - unlicensed
-			if (CDR_getStatus(&stat) == -1 || stat.Type == 0 || stat.Type == 0xff) {
+			if (CDR_getStatus(&cdr_stat) == -1 || cdr_stat.Type == 0 || cdr_stat.Type == 0xff) {
 				cdr.Result[1] = 0xc0;
 			}
 			else {
-				if (stat.Type == 2)
+				if (cdr_stat.Type == 2)
 					cdr.Result[1] |= 0x10;
 				if (CdromId[0] == '\0')
 					cdr.Result[1] |= 0x80;
@@ -1246,11 +1262,15 @@ void cdrInterrupt(void) {
 			cdr.SubqForwardSectors = 1;
 			cdr.sectorsRead = 0;
 			cdr.DriveState = DRIVESTATE_SEEK;
+			CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1],
+					cdr.SetSectorPlay[2]);
 
 			cycles = (cdr.Mode & MODE_SPEED) ? cdReadTime : cdReadTime * 2;
 			cycles += seekTime;
 			if (Config.hacks.cdr_read_timing)
 				cycles = cdrAlignTimingHack(cycles);
+			else if (canDoTurbo())
+				cycles = cdReadTime / 2;
 			CDRPLAYREAD_INT(cycles, 1);
 
 			SetPlaySeekRead(cdr.StatP, STATUS_SEEK);
@@ -1386,7 +1406,7 @@ static void cdrReadInterrupt(void)
 			subhdr->file, subhdr->chan, cdr.CurFile, cdr.CurChannel, cdr.FilterFile, cdr.FilterChannel);
 		if ((cdr.Mode & MODE_SF) && (subhdr->file != cdr.FilterFile || subhdr->chan != cdr.FilterChannel))
 			break;
-		if (subhdr->chan & 0xe0) { // ?
+		if (subhdr->chan & 0x80) { // ?
 			if (subhdr->chan != 0xff)
 				log_unhandled("adpcm %d:%d\n", subhdr->file, subhdr->chan);
 			break;
@@ -1423,6 +1443,7 @@ static void cdrReadInterrupt(void)
 		cdrReadInterruptSetResult(cdr.StatP);
 
 	msfiAdd(cdr.SetSectorPlay, 1);
+	CDR_prefetch(cdr.SetSectorPlay[0], cdr.SetSectorPlay[1], cdr.SetSectorPlay[2]);
 
 	CDRPLAYREAD_INT((cdr.Mode & MODE_SPEED) ? (cdReadTime / 2) : cdReadTime, 0);
 }
@@ -1441,6 +1462,8 @@ unsigned char cdrRead0(void) {
 	cdr.Ctrl |= cdr.AdpcmActive << 2;
 	cdr.Ctrl |= cdr.ResultReady << 5;
 
+	//cdr.Ctrl &= ~0x40;
+	//if (cdr.FifoOffset != DATA_SIZE)
 	cdr.Ctrl |= 0x40; // data fifo not empty
 
 	// What means the 0x10 and the 0x08 bits? I only saw it used by the bios
@@ -1640,7 +1663,7 @@ void cdrWrite3(unsigned char rt) {
 }
 
 void psxDma3(u32 madr, u32 bcr, u32 chcr) {
-	u32 cdsize, max_words;
+	u32 cdsize, max_words, cycles;
 	int size;
 	u8 *ptr;
 
@@ -1686,7 +1709,8 @@ void psxDma3(u32 madr, u32 bcr, u32 chcr) {
 			}
 			psxCpu->Clear(madr, cdsize / 4);
 
-			set_event(PSXINT_CDRDMA, (cdsize / 4) * 24);
+			cycles = (cdsize / 4) * 24;
+			set_event(PSXINT_CDRDMA, cycles);
 
 			HW_DMA3_CHCR &= SWAPu32(~0x10000000);
 			if (chcr & 0x100) {
@@ -1695,8 +1719,10 @@ void psxDma3(u32 madr, u32 bcr, u32 chcr) {
 			}
 			else {
 				// halted
-				psxRegs.cycle += (cdsize/4) * 24 - 20;
+				psxRegs.cycle += cycles - 20;
 			}
+			if (canDoTurbo() && cdr.Reading && cdr.FifoOffset >= 2048)
+				CDRPLAYREAD_INT(cycles + 4096, 1);
 			return;
 
 		default:

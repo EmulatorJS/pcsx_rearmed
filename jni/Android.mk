@@ -4,7 +4,6 @@ $(shell cd "$(LOCAL_PATH)" && ((git describe --always || echo) | sed -e 's/.*/#d
 $(shell cd "$(LOCAL_PATH)" && (diff -q ../frontend/revision.h_ ../frontend/revision.h > /dev/null 2>&1 || cp ../frontend/revision.h_ ../frontend/revision.h))
 $(shell cd "$(LOCAL_PATH)" && (rm ../frontend/revision.h_))
 
-HAVE_CHD ?= 1
 USE_LIBRETRO_VFS ?= 0
 
 ROOT_DIR     := $(LOCAL_PATH)/..
@@ -69,26 +68,43 @@ SOURCES_C += $(FRONTEND_DIR)/main.c \
              $(FRONTEND_DIR)/libretro.c
 
 # libchdr
+LCHDR = $(DEPS_DIR)/libchdr
+LCHDR_LZMA = $(LCHDR)/deps/lzma-24.05
+LCHDR_ZSTD = $(LCHDR)/deps/zstd-1.5.6/lib
 SOURCES_C += \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Alloc.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Bra86.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/BraIA64.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/CpuArch.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Delta.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/LzFind.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Lzma86Dec.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/LzmaDec.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/LzmaEnc.c \
-             $(DEPS_DIR)/libchdr/deps/lzma-19.00/src/Sort.c \
-             $(DEPS_DIR)/libchdr/src/libchdr_bitstream.c \
-             $(DEPS_DIR)/libchdr/src/libchdr_cdrom.c \
-             $(DEPS_DIR)/libchdr/src/libchdr_chd.c \
-             $(DEPS_DIR)/libchdr/src/libchdr_flac.c \
-             $(DEPS_DIR)/libchdr/src/libchdr_huffman.c
+	     $(LCHDR)/src/libchdr_bitstream.c \
+	     $(LCHDR)/src/libchdr_cdrom.c \
+	     $(LCHDR)/src/libchdr_chd.c \
+	     $(LCHDR)/src/libchdr_flac.c \
+	     $(LCHDR)/src/libchdr_huffman.c \
+	     $(LCHDR_LZMA)/src/Alloc.c \
+	     $(LCHDR_LZMA)/src/CpuArch.c \
+	     $(LCHDR_LZMA)/src/Delta.c \
+	     $(LCHDR_LZMA)/src/LzFind.c \
+	     $(LCHDR_LZMA)/src/LzmaDec.c \
+	     $(LCHDR_LZMA)/src/LzmaEnc.c \
+	     $(LCHDR_LZMA)/src/Sort.c \
+	     $(LCHDR_ZSTD)/common/entropy_common.c \
+	     $(LCHDR_ZSTD)/common/error_private.c \
+	     $(LCHDR_ZSTD)/common/fse_decompress.c \
+	     $(LCHDR_ZSTD)/common/xxhash.c \
+	     $(LCHDR_ZSTD)/common/zstd_common.c \
+	     $(LCHDR_ZSTD)/decompress/huf_decompress.c \
+	     $(LCHDR_ZSTD)/decompress/zstd_ddict.c \
+	     $(LCHDR_ZSTD)/decompress/zstd_decompress_block.c \
+	     $(LCHDR_ZSTD)/decompress/zstd_decompress.c
 SOURCES_ASM :=
+EXTRA_INCLUDES += $(LCHDR)/include $(LCHDR_LZMA)/include $(LCHDR_ZSTD)
+COREFLAGS += -DHAVE_CHD -DZ7_ST -DZSTD_DISABLE_ASM
+ifeq (,$(call gte,$(APP_PLATFORM_LEVEL),18))
+ifneq ($(TARGET_ARCH_ABI),arm64-v8a)
+# HACK
+COREFLAGS += -Dgetauxval=0*
+endif
+endif
 
-COREFLAGS := -ffast-math -funroll-loops -DHAVE_LIBRETRO -DNO_FRONTEND -DFRONTEND_SUPPORTS_RGB565 -DANDROID -DREARMED
-COREFLAGS += -DP_HAVE_MMAP=1 -DP_HAVE_PTHREAD=1 -DP_HAVE_POSIX_MEMALIGN=1 -DHAVE_CHD -D_7ZIP_ST
+COREFLAGS += -ffast-math -funroll-loops -DHAVE_LIBRETRO -DNO_FRONTEND -DFRONTEND_SUPPORTS_RGB565 -DANDROID -DREARMED
+COREFLAGS += -DP_HAVE_MMAP=1 -DP_HAVE_PTHREAD=1 -DP_HAVE_POSIX_MEMALIGN=1
 
 ifeq ($(USE_LIBRETRO_VFS),1)
 SOURCES_C += \
@@ -104,6 +120,7 @@ SOURCES_C += \
              $(LIBRETRO_COMMON)/vfs/vfs_implementation.c
 COREFLAGS += -DUSE_LIBRETRO_VFS
 endif
+EXTRA_INCLUDES += $(LIBRETRO_COMMON)/include
 
 HAVE_ARI64=0
 HAVE_LIGHTREC=0
@@ -144,7 +161,7 @@ endif
   SOURCES_C   += $(DYNAREC_DIR)/emu_if.c
 
 ifeq ($(HAVE_LIGHTREC),1)
-  COREFLAGS   += -DLIGHTREC -DLIGHTREC_STATIC
+  COREFLAGS   += -DLIGHTREC -DLIGHTREC_STATIC -DLIGHTREC_CODE_INV=0
   EXTRA_INCLUDES += $(DEPS_DIR)/lightning/include \
 		    $(DEPS_DIR)/lightrec \
 		    $(DEPS_DIR)/lightrec/tlsf \
@@ -169,8 +186,7 @@ ifeq ($(HAVE_LIGHTREC),1)
 					  $(DEPS_DIR)/lightning/lib/jit_print.c \
 					  $(DEPS_DIR)/lightning/lib/jit_size.c \
 					  $(DEPS_DIR)/lightning/lib/lightning.c
-  SOURCES_C   += $(CORE_DIR)/lightrec/plugin.c \
-		 $(CORE_DIR)/lightrec/internals.c
+  SOURCES_C   += $(CORE_DIR)/lightrec/plugin.c
 ifeq ($(LIGHTREC_CUSTOM_MAP),1)
   SOURCES_C   += $(CORE_DIR)/lightrec/mem.c
 endif
@@ -210,8 +226,7 @@ LOCAL_MODULE        := retro
 LOCAL_SRC_FILES     := $(SOURCES_C) $(SOURCES_ASM)
 LOCAL_CFLAGS        := $(COREFLAGS)
 LOCAL_C_INCLUDES    := $(ROOT_DIR)/include
-LOCAL_C_INCLUDES    += $(DEPS_DIR)/crypto $(DEPS_DIR)/libchdr/deps/lzma-19.00/include $(DEPS_DIR)/libchdr/include $(DEPS_DIR)/libchdr/include/libchdr
-LOCAL_C_INCLUDES    += $(LIBRETRO_COMMON)/include
+LOCAL_C_INCLUDES    += $(DEPS_DIR)/crypto
 LOCAL_C_INCLUDES    += $(EXTRA_INCLUDES)
 LOCAL_LDFLAGS       := -Wl,-version-script=$(FRONTEND_DIR)/link.T
 LOCAL_LDLIBS        := -lz -llog
