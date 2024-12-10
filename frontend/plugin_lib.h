@@ -80,31 +80,24 @@ struct rearmed_cbs {
 	unsigned int flip_cnt; // increment manually if not using pl_vout_flip
 	unsigned int only_16bpp; // platform is 16bpp-only
 	unsigned int thread_rendering;
+	unsigned int dithering; // 0 off, 1 on, 2 force
 	struct {
 		int   allow_interlace; // 0 off, 1 on, 2 guess
 		int   enhancement_enable;
 		int   enhancement_no_main;
-		int   allow_dithering;
 		int   enhancement_tex_adj;
 	} gpu_neon;
 	struct {
-		int   iUseDither;
 		int   dwActFixes;
 		float fFrameRateHz;
 		int   dwFrameRateTicks;
 	} gpu_peops;
 	struct {
-		int   abe_hack;
-		int   no_light, no_blend;
-		int   lineskip;
-	} gpu_unai_old;
-	struct {
+		int old_renderer;
 		int ilace_force;
-		int pixel_skip;
 		int lighting;
 		int fast_lighting;
 		int blending;
-		int dithering;
 		int scale_hires;
 	} gpu_unai;
 	struct {

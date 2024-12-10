@@ -1,6 +1,7 @@
 #include "misc.h"
 #include "sio.h"
 #include "ppf.h"
+#include "cdrom-async.h"
 #include "new_dynarec/new_dynarec.h"
 #include "lightrec/plugin.h"
 
@@ -81,6 +82,18 @@ static const char * const fractional_Framerate_hack_db[] =
 	"SCUS94425", "SCES02104",
 };
 
+static const char * const f1_hack_db[] =
+{
+	/* Formula One Arcade */
+	"SCES03886",
+	/* Formula One '99 */
+	"SLUS00870", "SCPS10101", "SCES01979", "SLES01979",
+	/* Formula One 2000 */
+	"SLUS01134", "SCES02777", "SCES02778", "SCES02779",
+	/* Formula One 2001 */
+	"SCES03404", "SCES03423", "SCES03424", "SCES03524",
+};
+
 #define HACK_ENTRY(var, list) \
 	{ #var, &Config.hacks.var, list, ARRAY_SIZE(list) }
 
@@ -99,6 +112,7 @@ hack_db[] =
 	HACK_ENTRY(gpu_timing1024, dualshock_timing1024_hack_db),
 	HACK_ENTRY(dualshock_init_analog, dualshock_init_analog_hack_db),
 	HACK_ENTRY(fractional_Framerate, fractional_Framerate_hack_db),
+	HACK_ENTRY(f1, f1_hack_db),
 };
 
 static const struct
@@ -137,35 +151,8 @@ cycle_multiplier_overrides[] =
 	{ 200, { "SCES02873" } },
 	/* Zero Divide - sometimes too fast */
 	{ 200, { "SLUS00183", "SLES00159", "SLPS00083", "SLPM80008" } },
-};
-
-static const struct
-{
-	const char * const id;
-	u32 hacks;
-}
-lightrec_hacks_db[] =
-{
-	/* Formula One Arcade */
-	{ "SCES03886", LIGHTREC_HACK_INV_DMA_ONLY },
-
-	/* Formula One '99 */
-	{ "SLUS00870", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCPS10101", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES01979", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SLES01979", LIGHTREC_HACK_INV_DMA_ONLY },
-
-	/* Formula One 2000 */
-	{ "SLUS01134", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES02777", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES02778", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES02779", LIGHTREC_HACK_INV_DMA_ONLY },
-
-	/* Formula One 2001 */
-	{ "SCES03404", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES03423", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES03424", LIGHTREC_HACK_INV_DMA_ONLY },
-	{ "SCES03524", LIGHTREC_HACK_INV_DMA_ONLY },
+	/* Eagle One: Harrier Attack - hangs (but not in standalone build?) */
+	{ 153, { "SLUS00943" } },
 };
 
 /* Function for automatic patching according to GameID. */
@@ -207,7 +194,9 @@ void Apply_Hacks_Cdrom(void)
 	}
 
 	/* Dynarec game-specific hacks */
-	new_dynarec_hacks_pergame = 0;
+	ndrc_g.hacks_pergame = 0;
+	if (Config.hacks.f1)
+		ndrc_g.hacks_pergame |= NDHACK_THREAD_FORCE; // force without *_ON -> off
 	Config.cycle_multiplier_override = 0;
 
 	for (i = 0; i < ARRAY_SIZE(cycle_multiplier_overrides); i++)
@@ -219,22 +208,19 @@ void Apply_Hacks_Cdrom(void)
 		if (j < ARRAY_SIZE(cycle_multiplier_overrides[i].id))
 		{
 			Config.cycle_multiplier_override = cycle_multiplier_overrides[i].mult;
-			new_dynarec_hacks_pergame |= NDHACK_OVERRIDE_CYCLE_M;
+			ndrc_g.hacks_pergame |= NDHACK_OVERRIDE_CYCLE_M;
 			SysPrintf("using cycle_multiplier_override: %d\n",
 				Config.cycle_multiplier_override);
 			break;
 		}
 	}
 
-	lightrec_hacks = 0;
-
-	for (i = 0; drc_is_lightrec() && i < ARRAY_SIZE(lightrec_hacks_db); i++) {
-		if (strcmp(CdromId, lightrec_hacks_db[i].id) == 0)
-		{
-			lightrec_hacks = lightrec_hacks_db[i].hacks;
+	if (drc_is_lightrec()) {
+		lightrec_hacks = 0;
+		if (Config.hacks.f1)
+			lightrec_hacks |= LIGHTREC_HACK_INV_DMA_ONLY;
+		if (lightrec_hacks)
 			SysPrintf("using lightrec_hacks: 0x%x\n", lightrec_hacks);
-			break;
-		}
 	}
 }
 
@@ -274,7 +260,9 @@ static const u16 libcrypt_sectors[16] = {
 int check_unsatisfied_libcrypt(void)
 {
 	const char *p = CdromId + 4;
+	u8 buf_sub[SUB_FRAMESIZE];
 	u16 id, key = 0;
+	u8 msf[3];
 	size_t i;
 
 	if (strncmp(CdromId, "SCE", 3) && strncmp(CdromId, "SLE", 3))
@@ -289,7 +277,8 @@ int check_unsatisfied_libcrypt(void)
 		return 0;
 
 	// detected a protected game
-	if (!CDR_getBufferSub(libcrypt_sectors[0]) && !sbi_sectors) {
+	lba2msf(libcrypt_sectors[0] + 150, &msf[0], &msf[1], &msf[2]);
+	if (!sbi_sectors && cdra_readSub(msf, buf_sub) != 0) {
 		SysPrintf("==================================================\n");
 		SysPrintf("LibCrypt game detected with missing SBI/subchannel\n");
 		SysPrintf("==================================================\n");

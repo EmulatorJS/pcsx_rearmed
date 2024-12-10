@@ -39,7 +39,8 @@ extern "C" {
 #define LE16TOH(x) (x)
 #endif
 
-#define BIT(x) (1 << (x))
+#undef BIT
+#define BIT(x) (1u << (x))
 
 #define PSX_GPU_STATUS_DHEIGHT		BIT(19)
 #define PSX_GPU_STATUS_PAL		BIT(20)
@@ -51,7 +52,6 @@ extern "C" {
 #define PSX_GPU_STATUS_DMA_MASK		(BIT(29) | BIT(30))
 
 struct psx_gpu {
-  uint32_t cmd_buffer[CMD_BUFFER_LEN];
   uint32_t regs[16];
   uint16_t *vram;
   uint32_t status;
@@ -110,6 +110,7 @@ struct psx_gpu {
     uint32_t pending_fill[3];
   } frameskip;
   uint32_t scratch_ex_regs[8]; // for threaded rendering
+  uint32_t cmd_buffer[CMD_BUFFER_LEN];
   void *(*get_enhancement_bufer)
     (int *x, int *y, int *w, int *h, int *vram_h);
   uint16_t *(*get_downscale_buffer)
@@ -145,6 +146,9 @@ int  vout_finish(void);
 void vout_update(void);
 void vout_blank(void);
 void vout_set_config(const struct rearmed_cbs *config);
+
+int  prim_try_simplify_quad_t (void *simplified, const void *prim);
+int  prim_try_simplify_quad_gt(void *simplified, const void *prim);
 
 /* listing these here for correct linkage if rasterizer uses c++ */
 struct GPUFreeze;
