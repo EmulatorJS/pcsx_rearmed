@@ -4,8 +4,6 @@
 TARGET ?= pcsx
 CFLAGS += -Wall -Iinclude -ffast-math
 
-NO_CONFIG_MAK = 1
-
 DEBUG ?= 0
 DEBUG_SYMS ?= 0
 ASSERTS ?= 0
