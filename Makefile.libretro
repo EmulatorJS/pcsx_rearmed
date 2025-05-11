@@ -8,6 +8,7 @@ HAVE_PHYSICAL_CDROM ?= 1
 USE_ASYNC_CDROM ?= 1
 USE_LIBRETRO_VFS ?= 0
 NDRC_THREAD ?= 1
+GNU_LINKER ?= 1
 
 # Dynarec options: lightrec, ari64
 DYNAREC ?= lightrec
@@ -125,6 +126,8 @@ endif
 LIBPTHREAD := -lpthread
 ifneq ($(findstring Haiku,$(shell uname -s)),)
 LIBDL := -lroot -lnetwork
+# easiest way to prevent libretro-common from breaking on Haiku
+HAVE_PHYSICAL_CDROM := 0
 else
 LIBDL := -ldl
 endif
@@ -207,6 +210,7 @@ else ifeq ($(platform), osx)
 	LDFLAGS += $(ARCHFLAGS)
 	HAVE_PHYSICAL_CDROM = 0
 	FSECTIONS_LDFLAGS = -Wl,-dead_strip
+	GNU_LINKER = 0
 
 # iOS
 else ifneq (,$(findstring ios,$(platform)))
@@ -245,6 +249,7 @@ else
 endif
 	CFLAGS += $(MINVERSION)
 	FSECTIONS_LDFLAGS = -Wl,-dead_strip
+	GNU_LINKER = 0
 
 else ifeq ($(platform), tvos-arm64)
 	TARGET := $(TARGET_NAME)_libretro_tvos.dylib
@@ -269,6 +274,7 @@ endif
 	MINVERSION = -mappletvos-version-min=11.0
 	CFLAGS += $(MINVERSION)
 	FSECTIONS_LDFLAGS = -Wl,-dead_strip
+	GNU_LINKER = 0
 
 # Nintendo Switch (libnx)
 else ifeq ($(platform), libnx)
@@ -331,8 +337,9 @@ else ifeq ($(platform), vita)
 	CFLAGS += -DVITA
 	CFLAGS += -mcpu=cortex-a9 -mtune=cortex-a9 -mfpu=neon -marm
 	CFLAGS += -fsingle-precision-constant -mword-relocations -fno-unwind-tables
-	CFLAGS += -fno-asynchronous-unwind-tables -ftree-vectorize -funroll-loops
-	CFLAGS += -fno-optimize-sibling-calls
+	CFLAGS += -fno-asynchronous-unwind-tables -ftree-vectorize
+	#CFLAGS += -funroll-loops # ~280K bloat
+	CFLAGS += -fno-optimize-sibling-calls # broken arm->thumb tailcalls?
 	CFLAGS += -I$(VITASDK)/include -Ifrontend/vita
 	CFLAGS += -DNO_DYLIB
 	CFLAGS_LAST += -O3
@@ -345,9 +352,11 @@ else ifeq ($(platform), vita)
 	DYNAREC = ari64
 	ARCH = arm
 	PARTIAL_LINKING = 1
-	NO_PTHREAD=1
+	NO_MMAP := 1
 	NO_POSIX_MEMALIGN := 1
+	NDRC_THREAD := 0 # can't write to tc from thread
 	HAVE_PHYSICAL_CDROM = 0
+	EXTRA_EXTERN_SYMS += _newlib_vm_size_user
 
 # CTR(3DS)
 else ifeq ($(platform), ctr)
@@ -610,21 +619,31 @@ else ifeq ($(platform), miyoo)
 # Emscripten
 else ifeq ($(platform), emscripten)
    TARGET  := $(TARGET_NAME)_libretro_$(platform).bc
+   pthread ?= 0
    fpic    := -fPIC
+
+   NO_MMAP = 1
+   # we can use -lz for emscripten's built-in zlib port
+   WANT_ZLIB=0
    CFLAGS += -DNO_DYLIB -DNO_SOCKET
    CFLAGS += -msimd128 -ftree-vectorize
-   ifeq ($(EMULATORJS_THREADS), 1)
-      THREAD_RENDERING = 1
-      LIBPTHREAD := -pthread
-      CFLAGS += -pthread
-      CXXFLAGS += -pthread
+   # when compiling with pthreads...
+   ifneq ($(EMULATORJS_THREADS), 1)
+      # use -lpthread
+      LIBPTHREAD := -lpthread
+      NO_PTHREAD=0
+      # but we don't want to include libretro-common's rthread object files here
+      USE_RTHREADS=0
+      USE_ASYNC_CDROM=0
+      # so we disable some uses of threads within pcsx_rearmed.
+      # is this a good solution? I don't know!
    else
       LIBPTHREAD :=
+      USE_RTHREADS=0
+      USE_ASYNC_CDROM=0
+      NO_PTHREAD=1
    endif
-   LIBDL :=
-   DYNAREC := 0
-   NO_MMAP = 1
-   NO_PTHREAD=1
+   DYNAREC =
    STATIC_LINKING = 1
    HAVE_PHYSICAL_CDROM = 0
 

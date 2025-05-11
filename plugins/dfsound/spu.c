@@ -333,11 +333,11 @@ INLINE int GetInterpolationGauss(const sample_buf *sb, int spos)
  int gpos = sb->interp.gauss.pos;
  int vl = (spos >> 6) & ~3;
  int vr;
- vr  = (gauss[vl+0] * gval(0)) >> 15;
- vr += (gauss[vl+1] * gval(1)) >> 15;
- vr += (gauss[vl+2] * gval(2)) >> 15;
- vr += (gauss[vl+3] * gval(3)) >> 15;
- return vr;
+ vr  = gauss[vl+0] * gval(0);
+ vr += gauss[vl+1] * gval(1);
+ vr += gauss[vl+2] * gval(2);
+ vr += gauss[vl+3] * gval(3);
+ return vr >> 15;
 }
 
 static void decode_block_data(int *dest, const unsigned char *src, int predict_nr, int shift_factor)
@@ -1256,8 +1256,8 @@ void do_samples(unsigned int cycles_to, int force_no_thread)
 static void do_samples_finish(int *SSumLR, int ns_to,
  int silentch, int decode_pos)
 {
-  int vol_l = ((int)regAreaGet(H_SPUmvolL) << 17) >> 17;
-  int vol_r = ((int)regAreaGet(H_SPUmvolR) << 17) >> 17;
+  int vol_l = ((int)regAreaGet(H_SPUcmvolL) << 16) >> 17;
+  int vol_r = ((int)regAreaGet(H_SPUcmvolR) << 16) >> 17;
   int ns;
   int d;
 
@@ -1573,6 +1573,14 @@ static void exit_spu_thread(void)
 }
 
 #endif
+
+long CALLBACK SPUfreeze(unsigned int ulFreezeMode, struct SPUFreeze * pF,
+ unsigned int cycles)
+{
+ if (worker != NULL)
+  sync_worker_thread(1);
+ return DoFreeze(ulFreezeMode, pF, cycles);
+}
 
 // SPUINIT: this func will be called first by the main emu
 long CALLBACK SPUinit(void)

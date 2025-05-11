@@ -756,6 +756,8 @@ static inline int checkLD(psxRegisters *regs, u32 addr, u32 m) {
 		return 0;
 	}
 	if (unlikely(BUS_LOCKED_ADDR(addr))) {
+		log_unhandled("bus error read addr=%08x @%08x ra=%08x\n",
+			addr, regs->pc - 4, regs->GPR.n.ra);
 		intException(regs, regs->pc - 4, R3000E_DBE << 2);
 		return 0;
 	}
@@ -779,6 +781,8 @@ static inline int checkST(psxRegisters *regs, u32 addr, u32 m) {
 		return 0;
 	}
 	if (unlikely(BUS_LOCKED_ADDR(addr))) {
+		log_unhandled("bus error write addr=%08x @%08x ra=%08x\n",
+			addr, regs->pc - 4, regs->GPR.n.ra);
 		intException(regs, regs->pc - 4, R3000E_DBE << 2);
 		return 0;
 	}
@@ -939,9 +943,9 @@ void MTC0(psxRegisters *regs_, int reg, u32 val) {
 //	SysPrintf("MTC0 %d: %x\n", reg, val);
 	switch (reg) {
 		case 12: // SR
-			if (unlikely((regs_->CP0.n.SR ^ val) & (1 << 16)))
+			if (unlikely((regs_->CP0.n.SR ^ val) & (1u << 16)))
 				psxMemOnIsolate((val >> 16) & 1);
-			if (unlikely((regs_->CP0.n.SR ^ val) & (7 << 29)))
+			if (unlikely((regs_->CP0.n.SR ^ val) & (7u << 29)))
 				setupCop(val);
 			regs_->CP0.n.SR = val;
 			psxTestSWInts(regs_, 1);
@@ -1166,6 +1170,7 @@ void (*psxCP2[64])(struct psxCP2Regs *regs) = {
 ///////////////////////////////////////////
 
 static int intInit() {
+	intApplyConfig();
 	return 0;
 }
 
@@ -1243,7 +1248,8 @@ static void intNotify(enum R3000Anote note, void *data) {
 		setupCop(psxRegs.CP0.n.SR);
 		// fallthrough
 	case R3000ACPU_NOTIFY_CACHE_ISOLATED: // Armored Core?
-		memset(&ICache, 0xff, sizeof(ICache));
+		if (fetch == fetchICache)
+			memset(&ICache, 0xff, sizeof(ICache));
 		break;
 	case R3000ACPU_NOTIFY_CACHE_UNISOLATED:
 		break;
@@ -1340,8 +1346,10 @@ void intApplyConfig() {
 
 	// the dynarec may occasionally call the interpreter, in such a case the
 	// cache won't work (cache only works right if all fetches go through it)
-	if (!Config.icache_emulation || psxCpu != &psxInt)
+	if (!Config.icache_emulation || psxCpu != &psxInt) {
 		fetch = fetchNoCache;
+		memset(&ICache, 0xff, sizeof(ICache));
+	}
 	else
 		fetch = fetchICache;
 

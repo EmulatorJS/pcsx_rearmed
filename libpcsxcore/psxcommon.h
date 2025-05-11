@@ -119,9 +119,6 @@ void __Log(char *fmt, ...);
 typedef struct {
 	char Gpu[MAXPATHLEN];
 	char Spu[MAXPATHLEN];
-	char Pad1[MAXPATHLEN];
-	char Pad2[MAXPATHLEN];
-	char Net[MAXPATHLEN];
 	char Sio1[MAXPATHLEN];
 	char Mcd1[MAXPATHLEN];
 	char Mcd2[MAXPATHLEN];
@@ -138,13 +135,13 @@ typedef struct {
 	boolean SlowBoot;
 	boolean Debug;
 	boolean PsxOut;
-	boolean UseNet;
 	boolean icache_emulation;
 	boolean DisableStalls;
 	boolean PreciseExceptions;
 	boolean TurboCD;
 	int cycle_multiplier; // 100 for 1.0
 	int cycle_multiplier_override;
+	int gpu_timing_override;
 	s8 GpuListWalking;
 	s8 FractionalFramerate; // ~49.75 and ~59.81 instead of 50 and 60
 	u8 Cpu; // CPU_DYNAREC or CPU_INTERPRETER
@@ -154,14 +151,12 @@ typedef struct {
 		boolean gpu_slow_list_walking;
 		boolean gpu_centering;
 		boolean dualshock_init_analog;
-		boolean gpu_timing1024;
 		boolean fractional_Framerate;
 		boolean f1;
 	} hacks;
 } PcsxConfig;
 
 extern PcsxConfig Config;
-extern boolean NetOpened;
 
 struct PcsxSaveFuncs {
 	void *(*open)(const char *name, const char *mode);

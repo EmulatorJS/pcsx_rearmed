@@ -229,13 +229,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "pcsx_rearmed_psxclock",
       "PSX CPU Clock Speed (%)",
       NULL,
-      "Overclock or under-clock the PSX CPU. The value has to be lower than 100 because of some slowdowns (cache misses, hw access penalties, etc.) that are not emulated. Try adjusting this if the game is too slow, too fast or hangs."
-#if defined(HAVE_PRE_ARMV7) && !defined(_3DS)
-      " Default is 50."
-#else
-      " Default is 57."
-#endif
-      ,
+      "Overclock or under-clock the PSX CPU. Should be much less than 100 (something like 57) due to some real hardware slowdowns not being emulated. Usually should be left at 'Auto', else glitches or hangs are likely.",
       NULL,
       "system",
       {
@@ -448,6 +442,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "auto",
    },
    {
+      "pcsx_rearmed_rgb32_output",
+      "RGB32 output",
+      NULL,
+      "Improves color depth for true color modes (most FMVs and occasional title screens). Causes higher CPU usage due to double memory bandwidth requirement, even in 15bpp modes. Takes effect on game reload only (libretro limitation).",
+      NULL,
+      "video",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled",
+   },
+   {
       "pcsx_rearmed_gpu_slow_llists",
       "(GPU) Slow linked list processing",
       NULL,
@@ -517,6 +525,19 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       {
          V(-16), V(-15), V(-14), V(-13), V(-12), V(-11), V(-10), V(-9), V(-8), V(-7), V(-6), V(-5), V(-4), V(-3), V(-2), V(-1),
 	 V(0), V(1), V(2), V(3), V(4), V(5), V(6), V(7), V(8), V(9), V(10), V(11), V(12), V(13), V(14), V(15), V(16),
+         { NULL, NULL },
+      },
+      "0",
+   },
+   {
+      "pcsx_rearmed_screen_centering_h_adj",
+      "(GPU) Manual height adjustment",
+      NULL,
+      "Height adjustment. Only effective when 'Screen centering' is set to 'Manual'.",
+      NULL,
+      "video",
+      {
+         V(-64), V(-48), V(-40), V(-32), V(-24), V(-16), V(-8), V(-7), V(-6), V(-5), V(-4), V(-3), V(-2), V(-1), V(0),
          { NULL, NULL },
       },
       "0",
@@ -755,6 +776,20 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "enabled",
    },
    {
+      "pcsx_rearmed_gpu_unai_skipline",
+      "(GPU) Skip every 2nd line",
+      "Skip every 2nd line",
+      "Skips every second scanline. Can be enabled to improve performance at the expense of display inaccuracies (artifacts etc.).",
+      NULL,
+      "gpu_unai",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL},
+      },
+      "disabled",
+   },
+   {
       "pcsx_rearmed_gpu_unai_lighting",
       "(GPU) Lighting Effects",
       "Lighting Effects",
@@ -909,7 +944,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
          { "square", "Square" },
          { NULL, NULL },
       },
-      "circle",
+      "square",
    },
    {
       "pcsx_rearmed_vibration",
@@ -1054,7 +1089,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "pcsx_rearmed_crosshair1",
       "Player 1 Lightgun Crosshair",
       NULL,
-      "Toggle player 1's crosshair for the Guncon or Konami Gun",
+      "Toggle player 1's crosshair for the Guncon or Konami Gun. Only works if RGB32 output is off (video options).",
       NULL,
       "input",
       {
@@ -1071,7 +1106,7 @@ struct retro_core_option_v2_definition option_defs_us[] = {
       "pcsx_rearmed_crosshair2",
       "Player 2 Lightgun Crosshair",
       NULL,
-      "Toggle player 2's crosshair for the Guncon or Konami Gun",
+      "Toggle player 2's crosshair for the Guncon or Konami Gun. Only works if RGB32 output is off (video options).",
       NULL,
       "input",
       {

@@ -114,9 +114,6 @@ static void set_default_paths(void)
 	strcpy(Config.PluginsDir, "plugins");
 	strcpy(Config.Gpu, "builtin_gpu");
 	strcpy(Config.Spu, "builtin_spu");
-	strcpy(Config.Pad1, "builtin_pad");
-	strcpy(Config.Pad2, "builtin_pad");
-	strcpy(Config.Net, "Disabled");
 }
 
 void emu_set_default_config(void)
@@ -436,49 +433,6 @@ static void log_wrong_cpu(void)
 #endif // DO_CPU_CHECKS
 }
 
-#define MKSTR2(x) #x
-#define MKSTR(x) MKSTR2(x)
-static const char *get_build_info(void)
-{
-	return " ("
-#ifdef __VERSION__
-		"cc " __VERSION__ " "
-#endif
-#if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
-		"64bit "
-#elif defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 4
-		"32bit "
-#endif
-#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-		"be "
-#endif
-#if defined(__PIC__) || defined(__pic__)
-		"pic "
-#endif
-#if defined(__aarch64__)
-		"arm64"
-#elif defined(__arm__)
-		"arm"
-#endif
-#ifdef __ARM_ARCH
-		"v" MKSTR(__ARM_ARCH) " "
-#endif
-#if defined(__AVX__)
-		"avx "
-#elif defined(__SSSE3__)
-		"ssse3 "
-#elif defined(__ARM_NEON) || defined(__ARM_NEON__)
-		"neon "
-#endif
-#if defined(LIGHTREC)
-		"lightrec "
-#elif !defined(DRC_DISABLE)
-		"ari64 "
-#endif
-		"gpu=" MKSTR(BUILTIN_GPU)
-		")";
-}
-
 int emu_core_preinit(void)
 {
 	// what is the name of the config file?
@@ -508,7 +462,7 @@ int emu_core_preinit(void)
 
 int emu_core_init(void)
 {
-	SysPrintf("Starting PCSX-ReARMed " REV "%s\n", get_build_info());
+	SysPrintf("Starting PCSX-ReARMed " REV " (%s)\n", get_build_info());
 	SysPrintf("build time: " __DATE__ " " __TIME__ "\n");
 
 #if defined(__arm__) && defined(__ARM_FP)
@@ -695,9 +649,9 @@ int main(int argc, char *argv[])
 	if (OpenPlugins() == -1) {
 		return 1;
 	}
-	plugin_call_rearmed_cbs();
 
 	CheckCdrom();
+	plugin_call_rearmed_cbs();
 	SysReset();
 
 	if (file[0] != '\0') {
@@ -737,7 +691,9 @@ int main(int argc, char *argv[])
 	else
 		menu_loop();
 
+#ifndef LIGHTREC_DEBUG
 	pl_start_watchdog();
+#endif
 
 	while (!g_emu_want_quit)
 	{
@@ -803,7 +759,7 @@ void SysRunGui() {
         printf("SysRunGui\n");
 }
 
-static void CALLBACK dummy_lace()
+static void CALLBACK dummy_lace(void)
 {
 }
 
@@ -951,10 +907,6 @@ static int _OpenPlugins(void) {
 	// pcsx-rearmed: we handle gpu elsewhere
 	//ret = GPU_open(&gpuDisp, "PCSX", NULL);
 	//if (ret < 0) { SysMessage(_("Error opening GPU plugin!")); return -1; }
-	//ret = PAD1_open(&gpuDisp);
-	//if (ret < 0) { SysMessage(_("Error opening Controller 1 plugin!")); return -1; }
-	//ret = PAD2_open(&gpuDisp);
-	//if (ret < 0) { SysMessage(_("Error opening Controller 2 plugin!")); return -1; }
 
 	return 0;
 }
@@ -981,10 +933,6 @@ void ClosePlugins() {
 	cdra_close();
 	ret = SPU_close();
 	if (ret < 0) { SysMessage(_("Error closing SPU plugin!")); }
-	ret = PAD1_close();
-	if (ret < 0) { SysMessage(_("Error closing Controller 1 Plugin!")); }
-	ret = PAD2_close();
-	if (ret < 0) { SysMessage(_("Error closing Controller 2 plugin!")); }
 	// pcsx-rearmed: we handle gpu elsewhere
 	//ret = GPU_close();
 	//if (ret < 0) { SysMessage(_("Error closing GPU plugin!")); return; }
@@ -992,11 +940,11 @@ void ClosePlugins() {
 
 /* we hook statically linked plugins here */
 static const char *builtin_plugins[] = {
-	"builtin_gpu", "builtin_spu", "builtin_pad",
+	"builtin_gpu", "builtin_spu"
 };
 
 static const int builtin_plugin_ids[] = {
-	PLUGIN_GPU, PLUGIN_SPU, PLUGIN_PAD,
+	PLUGIN_GPU, PLUGIN_SPU
 };
 
 void *SysLoadLibrary(const char *lib) {

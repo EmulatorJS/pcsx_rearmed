@@ -54,7 +54,7 @@ struct rearmed_cbs {
 	void  (*pl_get_layer_pos)(int *x, int *y, int *w, int *h);
 	int   (*pl_vout_open)(void);
 	void  (*pl_vout_set_mode)(int w, int h, int raw_w, int raw_h, int bpp);
-	void  (*pl_vout_flip)(const void *vram, int stride, int bgr24,
+	void  (*pl_vout_flip)(const void *vram, int vram_offset, int bgr24,
 			      int x, int y, int w, int h, int dims_changed);
 	void  (*pl_vout_close)(void);
 	void *(*mmap)(unsigned int size);
@@ -63,7 +63,7 @@ struct rearmed_cbs {
 	void  (*pl_vout_set_raw_vram)(void *vram);
 	void  (*pl_set_gpu_caps)(int caps);
 	// emulation related
-	void  (*gpu_state_change)(int what);
+	void  (*gpu_state_change)(int what, int cycles);
 	// some stats, for display by some plugins
 	int flips_per_sec, cpu_usage;
 	float vsps_cur; // currect vsync/s
@@ -112,6 +112,7 @@ struct rearmed_cbs {
 	int screen_centering_type_default;
 	int screen_centering_x;
 	int screen_centering_y;
+	int screen_centering_h_adj;
 	int show_overscan;
 };
 

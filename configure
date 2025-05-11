@@ -44,17 +44,21 @@ dynarec_list="ari64 lightrec none"
 builtin_gpu=""
 sound_driver_list="oss alsa pulseaudio sdl"
 sound_drivers=""
-plugins="plugins/spunull/spunull.so \
-plugins/dfxvideo/gpu_peops.so plugins/gpu_unai/gpu_unai.so"
+plugins=""
 drc_cache_base="no"
 have_armv5=""
 have_armv6=""
 have_armv7=""
 have_arm_neon=""
 have_arm_neon_asm=""
+have_neon_gpu=""
 have_tslib=""
+have_evdev=""
 have_gles=""
 have_c64x_dsp=""
+have_fsections="yes"
+have_dynamic="yes"
+gnu_linker="yes"
 dynarec=""
 multithreading="yes"
 need_sdl="no"
@@ -68,27 +72,42 @@ optimize_cortexa8="no"
 optimize_arm926ej="no"
 
 # hardcoded stuff
-if [ "${OSTYPE}" = "FreeBSD" ]; then
-	CC="clang"
-	CXX="clang++"
-	CFLAGS="-I/usr/local/include -L/usr/local/lib"
-	MAKE=gmake
-else
-	CC="${CC-${CROSS_COMPILE}gcc}"
-	CXX="${CXX-${CROSS_COMPILE}g++}"
-fi
+case "${OSTYPE}" in
+  *BSD*|*darwin*)
+    CC="clang"
+    CXX="clang++"
+    if test -d /opt/local/include; then
+      # MacPorts
+      CFLAGS="$CFLAGS -I/opt/local/include"
+      LDFLAGS="$LDFLAGS -L/opt/local/lib"
+    fi
+    if test -d /opt/local/include; then
+      CFLAGS="$CFLAGS -I/usr/local/include"
+      LDFLAGS="$LDFLAGS -L/usr/local/lib"
+    fi
+    MAKE=gmake
+    gnu_linker="no"
+    ;;
+  *)
+    CC="${CC-${CROSS_COMPILE}gcc}"
+    CXX="${CXX-${CROSS_COMPILE}g++}"
+    ;;
+esac
 AS="${AS-${CROSS_COMPILE}as}"
 AR="${AS-${CROSS_COMPILE}ar}"
 MAIN_LDLIBS="$LDLIBS -ldl -lm -lpthread"
 config_mak="config.mak"
 
-if [ "${OSTYPE}" = "FreeBSD" ]; then
-	SYSROOT="$sysroot"
-	[ "x${SDL_CONFIG}" = "x" ] && SDL_CONFIG="${SYSROOT}/usr/local/bin/sdl-config"
-else
-	SYSROOT="$(${CC} --print-sysroot)"
-	[ "x${SDL_CONFIG}" = "x" ] && SDL_CONFIG="${SYSROOT}/usr/bin/sdl-config"
-fi
+case "${OSTYPE}" in
+  *BSD*|*darwin*)
+    SYSROOT="$sysroot"
+    [ "x${SDL_CONFIG}" = "x" ] && SDL_CONFIG="${SYSROOT}/usr/local/bin/sdl-config"
+    ;;
+  *)
+    SYSROOT="$(${CC} --print-sysroot 2> /dev/null || true)"
+    [ "x${SDL_CONFIG}" = "x" ] && SDL_CONFIG="${SYSROOT}/usr/bin/sdl-config"
+    ;;
+esac
 
 fail()
 {
@@ -109,6 +128,7 @@ set_platform()
     drc_cache_base="yes"
     optimize_cortexa8="yes"
     have_arm_neon="yes"
+    have_neon_gpu="yes"
     need_xlib="yes"
     multithreading="no"
     ;;
@@ -116,6 +136,7 @@ set_platform()
     drc_cache_base="yes"
     optimize_cortexa8="yes"
     have_arm_neon="yes"
+    have_neon_gpu="yes"
     multithreading="no"
     ;;
   caanoo)
@@ -150,6 +171,10 @@ for opt do
   ;;
   --disable-threads) multithreading="no"
   ;;
+  --enable-dynamic) have_dynamic="yes"
+  ;;
+  --disable-dynamic) have_dynamic="no"
+  ;;
   --dynarec=*) dynarec="$optarg"
   ;;
   --disable-dynarec) dynarec="no"
@@ -172,6 +197,8 @@ if [ "$show_help" = "yes" ]; then
   echo "  --disable-neon           enable/disable ARM NEON optimizations [guessed]"
   echo "  --enable-threads"
   echo "  --disable-threads        enable/disable multithreaded features [guessed]"
+  echo "  --enable-dynamic"
+  echo "  --disable-dynamic        enable/disable dynamic loading obj. eg.plugins [guessed]"
   echo "  --dynarec=NAME           select dynamic recompiler [guessed]"
   echo "                           available: $dynarec_list"
   echo "influential environment variables:"
@@ -220,6 +247,14 @@ if [ -z "$ARCH" ]; then
 fi
 
 case "$ARCH" in
+aarch64|arm64)
+  have_arm_neon="yes"
+  have_neon_gpu="yes"
+  have_arm_neon_asm="no"
+  if [ "x$dynarec" = "x" ]; then
+    dynarec="ari64"
+  fi
+  ;;
 arm*)
   # ARM stuff
   ARCH="arm"
@@ -258,23 +293,13 @@ arm*)
     dynarec="ari64"
   fi
 
-  if [ "x$builtin_gpu" = "x" ]; then
-    if [ "$have_arm_neon" = "yes" ]; then
-      builtin_gpu="neon"
-    elif [ "$have_armv7" != "yes" ]; then
-      # pre-ARMv7 hardware is usually not fast enough for peops
-      builtin_gpu="unai"
-    else
-      builtin_gpu="peops"
-    fi
-  fi
-
-  # automatically set mfpu and mfloat-abi if they are not set
   if [ "$have_arm_neon" = "yes" ]; then
+    have_neon_gpu="yes"
     fpu="neon"
   elif [ "$have_armv6" = "yes" ]; then
     fpu="vfp"
   fi
+  # automatically set mfpu and mfloat-abi if they are not set
   if [ "x$fpu" != "x" ]; then
     echo "$CFLAGS" | grep -q -- '-mfpu=' || CFLAGS="$CFLAGS -mfpu=$fpu"
     echo "$ASFLAGS" | grep -q -- '-mfpu=' || ASFLAGS="$ASFLAGS -mfpu=$fpu"
@@ -305,23 +330,11 @@ arm*)
   fi
   have_arm_neon_asm=$have_arm_neon
   ;;
-aarch64)
-  have_arm_neon="yes"
-  have_arm_neon_asm="no"
-  if [ "x$dynarec" = "x" ]; then
-    dynarec="ari64"
-  fi
-  if [ "x$builtin_gpu" = "x" ]; then
-    builtin_gpu="neon"
-  fi
-  ;;
 x86_64)
   if [ "x$dynarec" = "x" ]; then
     dynarec="lightrec"
   fi
-  if [ "x$builtin_gpu" = "x" ]; then
-    builtin_gpu="neon"
-  fi
+  have_neon_gpu="yes"
   ;;
 *)
   if [ "x$dynarec" = "x" ]; then
@@ -331,12 +344,21 @@ x86_64)
 esac
 
 if [ "x$builtin_gpu" = "x" ]; then
-  builtin_gpu="peops"
+  if [ "$have_neon_gpu" = "yes" ]; then
+    builtin_gpu="neon"
+  elif [ "$ARCH" = "arm" -a "$have_armv7" != "yes" ]; then
+    # pre-ARMv7 hardware is usually not fast enough for peops
+    builtin_gpu="unai"
+  else
+    builtin_gpu="peops"
+  fi
 fi
 
 # supposedly we can avoid -fPIC on armv5 for slightly better performace?
 if [ "$ARCH" != "arm" -o "$have_armv6" = "yes" ]; then
   PLUGIN_CFLAGS="$PLUGIN_CFLAGS -fPIC"
+else
+  PLUGIN_CFLAGS="$PLUGIN_CFLAGS -fno-PIC"
 fi
 
 case "$platform" in
@@ -399,7 +421,7 @@ check_sdl()
 {
   cat > $TMPC <<EOF
   #include <SDL.h>
-  void main() { SDL_OpenAudio(0, 0); }
+  int main(int argc, char *argv[]) { SDL_OpenAudio(0, 0); }
 EOF
   compile_binary "$@"
 }
@@ -479,6 +501,24 @@ EOF
   fi
 fi
 
+# evdev
+if [ "x$have_evdev" = "x" ]; then
+  cat > $TMPC <<EOF
+  #include <linux/input.h>
+EOF
+  have_evdev="no"
+  if compile_object; then
+    have_evdev="yes"
+  else
+    cat > $TMPC <<EOF
+    #include <dev/evdev/input.h>
+EOF
+    if compile_object; then
+      have_evdev="yes"
+    fi
+  fi
+fi
+
 # check for VideoCore stuff for Raspberry Pi
 if [ -d /opt/vc/include -a -d /opt/vc/lib -a "$VIDEOCORE" != "no" ]; then
   CFLAGS_GLES="$CFLAGS_GLES -I/opt/vc/include -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux"
@@ -513,11 +553,25 @@ if check_c64_tools; then
   have_c64x_dsp="yes"
 fi
 
-if [ "$have_gles" = "yes" ]; then
-  plugins="$plugins plugins/gpu-gles/gpu_gles.so"
-fi
-if [ "$have_arm_neon" = "yes" -a "$builtin_gpu" != "neon" ]; then
-  plugins="$plugins plugins/gpu_neon/gpu_neon.so"
+# declare available dynamic plugins
+if [ "$have_dynamic" = "yes" ]; then
+  plugins="plugins/spunull/spunull.so"
+
+  if [ "$builtin_gpu" != "peops" ]; then
+    plugins="$plugins plugins/dfxvideo/gpu_peops.so"
+  fi
+  if [ "$builtin_gpu" != "unai" ]; then
+    plugins="$plugins plugins/gpu_unai/gpu_unai.so"
+  fi
+  if [ "$have_gles" = "yes" ]; then
+    plugins="$plugins plugins/gpu-gles/gpu_gles.so"
+  fi
+  if [ "$have_neon_gpu" = "yes" -a "$builtin_gpu" != "neon" ]; then
+    plugins="$plugins plugins/gpu_neon/gpu_neon.so"
+  fi
+else
+  have_dynamic="no"
+  CFLAGS="$CFLAGS -DNO_DYLIB"
 fi
 
 # check for xlib (only headers needed)
@@ -568,7 +622,11 @@ if [ "$ARCH" = "arm" ]; then
   echo "ARMv7 optimizations $have_armv7"
   echo "TI C64x DSP support $have_c64x_dsp"
 fi
-echo "tslib support       $have_tslib"
+if [ "$have_dynamic" = "yes" ]; then
+  echo "tslib support       $have_tslib"
+else
+  echo "tslib does NOT support staticly linked build"
+fi
 if [ "$platform" = "generic" ]; then
   echo "OpenGL ES output    $have_gles"
 fi
@@ -595,19 +653,31 @@ echo "PLATFORM = $platform" >> $config_mak
 echo "BUILTIN_GPU = $builtin_gpu" >> $config_mak
 echo "SOUND_DRIVERS = $sound_drivers" >> $config_mak
 echo "PLUGINS = $plugins" >> $config_mak
+if [ "$have_neon_gpu" = "yes" ]; then
+  echo "HAVE_NEON_GPU = 1" >> $config_mak
+fi
 if [ "$have_arm_neon" = "yes" ]; then
   echo "HAVE_NEON = 1" >> $config_mak
 fi
 if [ "$have_arm_neon_asm" = "yes" ]; then
   echo "HAVE_NEON_ASM = 1" >> $config_mak
 fi
-if [ "$have_tslib" = "yes" ]; then
+if [ "$have_tslib" = "yes" -a "$have_dynamic" = "yes" ]; then
   echo "HAVE_TSLIB = 1" >> $config_mak
+fi
+if [ "$have_evdev" = "yes" ]; then
+  echo "HAVE_EVDEV = 1" >> $config_mak
 fi
 if [ "$have_gles" = "yes" ]; then
   echo "HAVE_GLES = 1" >> $config_mak
   echo "CFLAGS_GLES = $CFLAGS_GLES" >> $config_mak
   echo "LDLIBS_GLES = $LDLIBS_GLES" >> $config_mak
+fi
+if [ "$have_fsections" = "no" ]; then
+  echo "NO_FSECTIONS = 1" >> $config_mak
+fi
+if [ "$gnu_linker" = "yes" ]; then
+  echo "GNU_LINKER = 1" >> $config_mak
 fi
 echo "DYNAREC = $dynarec" >> $config_mak
 if [ "$drc_cache_base" = "yes" ]; then
