@@ -15,8 +15,8 @@
 
 //#define RAW_FB_DISPLAY
 
-#define gpu_log(fmt, ...) \
-  printf("%d:%03d: " fmt, *gpu.state.frame_count, *gpu.state.hcnt, ##__VA_ARGS__)
+#define gpu_log(gpu, fmt, ...) \
+  printf("%d:%03d: " fmt, *(gpu)->state.frame_count, *(gpu)->state.hcnt, ##__VA_ARGS__)
 
 //#define log_anomaly gpu_log
 #define log_anomaly(...)
@@ -39,7 +39,8 @@ extern "C" {
 #define LE16TOH(x) (x)
 #endif
 
-#define BIT(x) (1 << (x))
+#undef BIT
+#define BIT(x) (1u << (x))
 
 #define PSX_GPU_STATUS_DHEIGHT		BIT(19)
 #define PSX_GPU_STATUS_PAL		BIT(20)
@@ -51,7 +52,6 @@ extern "C" {
 #define PSX_GPU_STATUS_DMA_MASK		(BIT(29) | BIT(30))
 
 struct psx_gpu {
-  uint32_t cmd_buffer[CMD_BUFFER_LEN];
   uint32_t regs[16];
   uint16_t *vram;
   uint32_t status;
@@ -94,8 +94,9 @@ struct psx_gpu {
     uint32_t w_out_old, h_out_old, status_vo_old;
     short screen_centering_type;
     short screen_centering_type_default;
-    int screen_centering_x;
-    int screen_centering_y;
+    short screen_centering_x;
+    short screen_centering_y;
+    int screen_centering_h_adj;
   } state;
   struct {
     int32_t set:3; /* -1 auto, 0 off, 1-3 fixed */
@@ -110,13 +111,14 @@ struct psx_gpu {
     uint32_t pending_fill[3];
   } frameskip;
   uint32_t scratch_ex_regs[8]; // for threaded rendering
+  uint32_t cmd_buffer[CMD_BUFFER_LEN];
   void *(*get_enhancement_bufer)
     (int *x, int *y, int *w, int *h, int *vram_h);
   uint16_t *(*get_downscale_buffer)
     (int *x, int *y, int *w, int *h, int *vram_h);
   void *(*mmap)(unsigned int size);
   void  (*munmap)(void *ptr, unsigned int size);
-  void  (*gpu_state_change)(int what); // psx_gpu_state
+  void  (*gpu_state_change)(int what, int cycles); // psx_gpu_state
 };
 
 extern struct psx_gpu gpu;
@@ -142,9 +144,12 @@ void renderer_notify_scanout_change(int x, int y);
 
 int  vout_init(void);
 int  vout_finish(void);
-void vout_update(void);
+int  vout_update(void);
 void vout_blank(void);
 void vout_set_config(const struct rearmed_cbs *config);
+
+int  prim_try_simplify_quad_t (void *simplified, const void *prim);
+int  prim_try_simplify_quad_gt(void *simplified, const void *prim);
 
 /* listing these here for correct linkage if rasterizer uses c++ */
 struct GPUFreeze;

@@ -3,6 +3,7 @@
  * Copyright (C) 2014-2021 Paul Cercueil <paul@crapouillou.net>
  */
 
+#include "arch.h"
 #include "blockcache.h"
 #include "debug.h"
 #include "disassembler.h"
@@ -566,22 +567,13 @@ static void lightrec_mtc0(struct lightrec_state *state, u8 reg, u32 data)
 
 static u32 count_leading_bits(s32 data)
 {
-	u32 cnt = 33;
-
 #ifdef __has_builtin
 #if __has_builtin(__builtin_clrsb)
 	return 1 + __builtin_clrsb(data);
 #endif
 #endif
-
-	data = (data ^ (data >> 31)) << 1;
-
-	do {
-		cnt -= 1;
-		data >>= 1;
-	} while (data);
-
-	return cnt;
+	data ^= data >> 31;
+	return data ? clz32(data) : 32;
 }
 
 static void lightrec_mtc2(struct lightrec_state *state, u8 reg, u32 data)
@@ -1138,6 +1130,9 @@ static struct block * generate_dispatcher(struct lightrec_state *state)
 
 	loop = jit_label();
 
+	if (!arch_has_fast_mask())
+		jit_movi(JIT_R1, 0x1fffffff);
+
 	/* Call the block's code */
 	jit_jmpr(JIT_V1);
 
@@ -1581,6 +1576,9 @@ int lightrec_compile_block(struct lightrec_cstate *cstate,
 
 	if (OPT_PRELOAD_PC && (block->flags & BLOCK_PRELOAD_PC))
 		lightrec_preload_pc(cstate->reg_cache, _jit);
+
+	if (!arch_has_fast_mask())
+		lightrec_preload_imm(cstate->reg_cache, _jit, JIT_R1, 0x1fffffff);
 
 	cstate->cycles = 0;
 	cstate->nb_local_branches = 0;

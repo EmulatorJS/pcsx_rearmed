@@ -8,8 +8,10 @@
 #define _GNU_SOURCE 1 // strcasestr
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
+#include <assert.h>
 #ifdef __MACH__
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -25,6 +27,7 @@
 #include "../libpcsxcore/psxmem_map.h"
 #include "../libpcsxcore/new_dynarec/new_dynarec.h"
 #include "../libpcsxcore/cdrom.h"
+#include "../libpcsxcore/cdrom-async.h"
 #include "../libpcsxcore/cdriso.h"
 #include "../libpcsxcore/cheat.h"
 #include "../libpcsxcore/r3000a.h"
@@ -48,7 +51,14 @@
 #endif
 
 #ifdef _3DS
+#include <3ds/svc.h>
+#include <3ds/services/apt.h>
+#include <3ds/allocator/linear.h>
 #include "3ds/3ds_utils.h"
+#endif
+
+#ifndef MAP_FAILED
+#define MAP_FAILED      ((void *)(intptr_t)-1)
 #endif
 
 #define PORTS_NUMBER 8
@@ -62,8 +72,6 @@
 #endif
 
 #define ISHEXDEC ((buf[cursor] >= '0') && (buf[cursor] <= '9')) || ((buf[cursor] >= 'a') && (buf[cursor] <= 'f')) || ((buf[cursor] >= 'A') && (buf[cursor] <= 'F'))
-
-#define INTERNAL_FPS_SAMPLE_PERIOD 64
 
 //hack to prevent retroarch freezing when reseting in the menu but not while running with the hot key
 static int rebootemu = 0;
@@ -88,13 +96,12 @@ static unsigned msg_interface_version = 0;
 
 static void *vout_buf;
 static void *vout_buf_ptr;
-static int vout_width = 256, vout_height = 240, vout_pitch = 256;
+static int vout_width = 256, vout_height = 240, vout_pitch_b = 256*2;
 static int vout_fb_dirty;
 static int psx_w, psx_h;
 static bool vout_can_dupe;
 static bool found_bios;
-static bool display_internal_fps = false;
-static unsigned frame_count = 0;
+static int display_internal_fps;
 static bool libretro_supports_bitmasks = false;
 static bool libretro_supports_option_categories = false;
 static bool show_input_settings = true;
@@ -127,8 +134,9 @@ static int retro_audio_buff_underrun            = false;
 static unsigned retro_audio_latency             = 0;
 static int update_audio_latency                 = false;
 
-static unsigned previous_width = 0;
-static unsigned previous_height = 0;
+static unsigned int current_width;
+static unsigned int current_height;
+static enum retro_pixel_format current_fmt;
 
 static int plugins_opened;
 
@@ -179,7 +187,11 @@ static int negcon_linearity = 1;
 static bool axis_bounds_modifier;
 
 /* PSX max resolution is 640x512, but with enhancement it's 1024x512 */
+#ifdef GPU_NEON
 #define VOUT_MAX_WIDTH  1024
+#else
+#define VOUT_MAX_WIDTH  640
+#endif
 #define VOUT_MAX_HEIGHT 512
 
 //Dummy functions
@@ -236,26 +248,60 @@ static void init_memcard(char *mcd_data)
    }
 }
 
-static void set_vout_fb()
+static void bgr_to_fb_empty(void *dst, const void *src, int bytes)
+{
+}
+
+typedef void (bgr_to_fb_func)(void *dst, const void *src, int bytes);
+static bgr_to_fb_func *g_bgr_to_fb = bgr_to_fb_empty;
+
+static void set_bgr_to_fb_func(int bgr24)
+{
+   switch (current_fmt)
+   {
+   case RETRO_PIXEL_FORMAT_XRGB8888:
+      g_bgr_to_fb = bgr24 ? bgr888_to_xrgb8888 : bgr555_to_xrgb8888;
+      break;
+   case RETRO_PIXEL_FORMAT_RGB565:
+      g_bgr_to_fb = bgr24 ? bgr888_to_rgb565 : bgr555_to_rgb565;
+      break;
+   default:
+      LogErr("unsupported current_fmt: %d\n", current_fmt);
+      g_bgr_to_fb = bgr_to_fb_empty;
+      break;
+   }
+}
+
+static void set_vout_fb(void)
 {
    struct retro_framebuffer fb = { 0 };
+   bool ret;
 
    fb.width          = vout_width;
    fb.height         = vout_height;
    fb.access_flags   = RETRO_MEMORY_ACCESS_WRITE;
 
-   vout_pitch = vout_width;
-   if (environ_cb(RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER, &fb)
-         && fb.format == RETRO_PIXEL_FORMAT_RGB565
-         && vout_can_dupe)
+   ret = environ_cb(RETRO_ENVIRONMENT_GET_CURRENT_SOFTWARE_FRAMEBUFFER, &fb);
+   if (ret && vout_can_dupe &&
+       (fb.format == RETRO_PIXEL_FORMAT_RGB565 || fb.format == RETRO_PIXEL_FORMAT_XRGB8888))
    {
+      int bytes_pp = (fb.format == RETRO_PIXEL_FORMAT_XRGB8888) ? 4 : 2;
+      if (current_fmt != fb.format) {
+         LogWarn("fb.format changed: %d->%d\n", current_fmt, fb.format);
+         current_fmt = fb.format;
+      }
       vout_buf_ptr = fb.data;
-      if (fb.pitch / 2 != vout_pitch && fb.pitch != vout_width * 2)
-         LogWarn("got unusual pitch %zd for resolution %dx%d\n", fb.pitch, vout_width, vout_height);
-      vout_pitch = fb.pitch / 2;
+      vout_pitch_b = fb.pitch;
+      if (fb.pitch != vout_width * bytes_pp)
+         LogWarn("got unusual pitch %zd for fmt %d resolution %dx%d\n",
+               fb.pitch, fb.format, vout_width, vout_height);
    }
    else
+   {
+      int bytes_pp = (current_fmt == RETRO_PIXEL_FORMAT_XRGB8888) ? 4 : 2;
       vout_buf_ptr = vout_buf;
+      vout_pitch_b = vout_width * bytes_pp;
+   }
 }
 
 static void vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
@@ -265,10 +311,15 @@ static void vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
    psx_w = raw_w;
    psx_h = raw_h;
 
-   if (previous_width != vout_width || previous_height != vout_height)
+   /* it may seem like we could do RETRO_ENVIRONMENT_SET_PIXEL_FORMAT here to
+    * switch to something that can accommodate bgr24 for FMVs, but although it
+    * succeeds it doesn't actually change the format at least on Linux, and the
+    * docs say only retro_load_game() can do it */
+
+   if (current_width != vout_width || current_height != vout_height)
    {
-      previous_width = vout_width;
-      previous_height = vout_height;
+      current_width = vout_width;
+      current_height = vout_height;
 
       struct retro_system_av_info info;
       retro_get_system_av_info(&info);
@@ -276,23 +327,12 @@ static void vout_set_mode(int w, int h, int raw_w, int raw_h, int bpp)
    }
 
    set_vout_fb();
+   set_bgr_to_fb_func(bpp == 24);
 }
-
-#ifndef FRONTEND_SUPPORTS_RGB565
-static void convert(void *buf, size_t bytes)
-{
-   unsigned int i, v, *p = buf;
-
-   for (i = 0; i < bytes / 4; i++)
-   {
-      v = p[i];
-      p[i] = (v & 0x001f001f) | ((v >> 1) & 0x7fe07fe0);
-   }
-}
-#endif
 
 // Function to add crosshairs
-static void addCrosshair(int port, int crosshair_color, unsigned short *buffer, int bufferStride, int pos_x, int pos_y, int thickness, int size_x, int size_y) {
+static void addCrosshair(int port, int crosshair_color, unsigned short *buffer, int bufferStride, int pos_x, int pos_y, int thickness, int size_x, int size_y)
+{
    for (port = 0; port < 2; port++) {
       // Draw the horizontal line of the crosshair
       int i, j;
@@ -331,135 +371,224 @@ static void CrosshairDimensions(int port, struct CrosshairInfo *info) {
    info->size_y = psx_h * (pl_rearmed_cbs.gpu_neon.enhancement_enable ? 2 : 1) * (4.0f / 3.0f) / 40.0f;
 }
 
-static void vout_flip(const void *vram, int stride, int bgr24,
+static void vout_flip(const void *vram_, int vram_ofs, int bgr24,
       int x, int y, int w, int h, int dims_changed)
 {
-   unsigned short *dest = vout_buf_ptr;
-   const unsigned short *src = vram;
-   int dstride = vout_pitch, h1 = h;
-   int port = 0;
+   int bytes_pp = (current_fmt == RETRO_PIXEL_FORMAT_XRGB8888) ? 4 : 2;
+   int bytes_pp_s = bgr24 ? 3 : 2;
+   bgr_to_fb_func *bgr_to_fb = g_bgr_to_fb;
+   unsigned char *dest = vout_buf_ptr;
+   const unsigned char *vram = vram_;
+   int dstride = vout_pitch_b, h1 = h;
+   int enhres = w > psx_w;
+   u32 vram_mask = enhres ? ~0 : 0xfffff;
+   int port = 0, hwrapped;
 
    if (vram == NULL || dims_changed || (in_enable_crosshair[0] + in_enable_crosshair[1]) > 0)
    {
-      memset(vout_buf_ptr, 0, dstride * vout_height * 2);
+      unsigned char *dest2 = dest;
+      int h2 = h, ll = vout_width * bytes_pp;
+      if (dstride == ll)
+         memset(dest2, 0, dstride * vout_height);
+      else
+         for (; h2-- > 0; dest2 += dstride)
+            memset(dest2, 0, ll);
       // blanking
       if (vram == NULL)
          goto out;
    }
 
-   dest += x + y * dstride;
+   dest += x * bytes_pp + y * dstride;
 
-   if (bgr24)
-   {
-      // XXX: could we switch to RETRO_PIXEL_FORMAT_XRGB8888 here?
-      for (; h1-- > 0; dest += dstride, src += stride)
-      {
-         bgr888_to_rgb565(dest, src, w * 3);
-      }
-   }
-   else
-   {
-      for (; h1-- > 0; dest += dstride, src += stride)
-      {
-         bgr555_to_rgb565(dest, src, w * 2);
-      }
+   for (; h1-- > 0; dest += dstride) {
+      bgr_to_fb(dest, vram + vram_ofs, w * bytes_pp_s);
+      vram_ofs = (vram_ofs + 2048) & vram_mask;
    }
 
+   hwrapped = (vram_ofs & 2047) + w * bytes_pp_s - 2048;
+   if (!enhres && hwrapped > 0) {
+      // this is super-rare so just fix-up
+      vram_ofs = (vram_ofs - h * 2048) & 0xff800;
+      dest -= dstride * h;
+      dest += (w - hwrapped / bytes_pp_s) * bytes_pp;
+      for (h1 = h; h1-- > 0; dest += dstride) {
+         bgr_to_fb(dest, vram + vram_ofs, hwrapped);
+         vram_ofs = (vram_ofs + 2048) & 0xfffff;
+      }
+   }
+
+   if (current_fmt == RETRO_PIXEL_FORMAT_RGB565)
    for (port = 0; port < 2; port++) {
       if (in_enable_crosshair[port] > 0 && (in_type[port] == PSE_PAD_TYPE_GUNCON || in_type[port] == PSE_PAD_TYPE_GUN))
       {
          struct CrosshairInfo crosshairInfo;
          CrosshairDimensions(port, &crosshairInfo);
-         addCrosshair(port, in_enable_crosshair[port], dest, dstride, crosshairInfo.pos_x, crosshairInfo.pos_y, crosshairInfo.thickness, crosshairInfo.size_x, crosshairInfo.size_y);
+         addCrosshair(port, in_enable_crosshair[port], (unsigned short *)dest,
+               dstride / 2, crosshairInfo.pos_x, crosshairInfo.pos_y,
+               crosshairInfo.thickness, crosshairInfo.size_x, crosshairInfo.size_y);
       }
    }
 
 out:
-#ifndef FRONTEND_SUPPORTS_RGB565
-   convert(vout_buf_ptr, vout_pitch * vout_height * 2);
-#endif
    vout_fb_dirty = 1;
    pl_rearmed_cbs.flip_cnt++;
 }
 
 #ifdef _3DS
-typedef struct
-{
-   void *buffer;
-   uint32_t target_map;
-   size_t size;
-   enum psxMapTag tag;
-} psx_map_t;
+static u32 mapped_addrs[8];
+static u32 mapped_ram, mapped_ram_src;
+static void *vram_mem;
 
-psx_map_t custom_psx_maps[] = {
-   { NULL, 0x13000000, 0x210000, MAP_TAG_RAM }, // 0x80000000
-   { NULL, 0x12800000, 0x010000, MAP_TAG_OTHER }, // 0x1f800000
-   { NULL, 0x12c00000, 0x080000, MAP_TAG_OTHER }, // 0x1fc00000
-   { NULL, 0x11000000, 0x800000, MAP_TAG_LUTS }, // 0x08000000
-   { NULL, 0x12000000, 0x201000, MAP_TAG_VRAM }, // 0x00000000
-};
-
-void *pl_3ds_mmap(unsigned long addr, size_t size, int is_fixed,
-    enum psxMapTag tag)
+// http://3dbrew.org/wiki/Memory_layout#ARM11_User-land_memory_regions
+static void *pl_3ds_mmap(unsigned long addr, size_t size,
+    enum psxMapTag tag, int *can_retry_addr)
 {
-   (void)is_fixed;
+   void *ret = MAP_FAILED;
+   *can_retry_addr = 0;
    (void)addr;
 
-   if (__ctr_svchax)
+   if (tag == MAP_TAG_VRAM && vram_mem)
+      return vram_mem;
+
+   if (__ctr_svchax) do
    {
-      psx_map_t *custom_map = custom_psx_maps;
+      // idea from fbalpha2012_neogeo
+      s32 addr = 0x10000000 - 0x1000;
+      u32 found_addr = 0;
+      MemInfo mem_info;
+      PageInfo page_info;
+      size_t i;
+      int r;
 
-      for (; custom_map->size; custom_map++)
+      for (i = 0; i < sizeof(mapped_addrs) / sizeof(mapped_addrs[0]); i++)
+         if (mapped_addrs[i] == 0)
+            break;
+      if (i == sizeof(mapped_addrs) / sizeof(mapped_addrs[0]))
+         break;
+
+      size = (size + 0xfff) & ~0xfff;
+
+      while (addr >= 0x08000000)
       {
-         if ((custom_map->size == size) && (custom_map->tag == tag))
-         {
-            uint32_t ptr_aligned, tmp;
-            void *ret;
+         if ((r = svcQueryMemory(&mem_info, &page_info, addr)) < 0) {
+            LogErr("svcQueryMemory failed: %d\n", r);
+            break;
+         }
 
-            custom_map->buffer = malloc(size + 0x1000);
-            ptr_aligned = (((u32)custom_map->buffer) + 0xFFF) & ~0xFFF;
+         if (mem_info.state == MEMSTATE_FREE && mem_info.size >= size) {
+            found_addr = mem_info.base_addr + mem_info.size - size;
+            break;
+         }
 
-            if (svcControlMemory(&tmp, (void *)custom_map->target_map, (void *)ptr_aligned, size, MEMOP_MAP, 0x3) < 0)
-            {
-               LogErr("could not map memory @0x%08X\n", custom_map->target_map);
-               exit(1);
-            }
+         addr = mem_info.base_addr - 0x1000;
+      }
+      if (found_addr == 0) {
+         LogErr("no addr space for %u bytes\n", size);
+         break;
+      }
 
-            ret = (void *)custom_map->target_map;
-            memset(ret, 0, size);
-            return ret;
+      // https://libctru.devkitpro.org/svc_8h.html#a8046e9b23b1b209a4e278cb1c19c7a5a
+      if ((r = svcControlMemory(&mapped_addrs[i], found_addr, 0, size, MEMOP_ALLOC, MEMPERM_READWRITE)) < 0) {
+         LogErr("svcControlMemory failed for %08x %u: %d\n", found_addr, size, r);
+         break;
+      }
+      if (mapped_addrs[i] == 0) // needed?
+         mapped_addrs[i] = found_addr;
+      ret = (void *)mapped_addrs[i];
+
+      // "round" address helps the dynarec slightly, map ram at 0x13000000
+      if (tag == MAP_TAG_RAM && !mapped_ram) {
+         u32 target = 0x13000000;
+         if ((r = svcControlMemory(&mapped_ram, target, mapped_addrs[i], size, MEMOP_MAP, MEMPERM_READWRITE)) < 0)
+            LogErr("could not map ram %08x -> %08x: %d\n", mapped_addrs[i], target, r);
+         else {
+            mapped_ram_src = mapped_addrs[i];
+            mapped_ram = target;
+            ret = (void *)mapped_ram;
          }
       }
+      memset(ret, 0, size);
+      return ret;
    }
+   while (0);
 
-   return calloc(size, 1);
+   ret = calloc(size, 1);
+   return ret ? ret : MAP_FAILED;
 }
 
-void pl_3ds_munmap(void *ptr, size_t size, enum psxMapTag tag)
+static void pl_3ds_munmap(void *ptr, size_t size, enum psxMapTag tag)
 {
    (void)tag;
 
-   if (__ctr_svchax)
+   if (ptr && ptr == vram_mem)
+      return;
+
+   if (ptr && __ctr_svchax)
    {
-      psx_map_t *custom_map = custom_psx_maps;
+      size_t i;
+      u32 tmp;
 
-      for (; custom_map->size; custom_map++)
-      {
-         if ((custom_map->target_map == (uint32_t)ptr))
-         {
-            uint32_t ptr_aligned, tmp;
+      size = (size + 0xfff) & ~0xfff;
 
-            ptr_aligned = (((u32)custom_map->buffer) + 0xFFF) & ~0xFFF;
-
-            svcControlMemory(&tmp, (void *)custom_map->target_map, (void *)ptr_aligned, size, MEMOP_UNMAP, 0x3);
-
-            free(custom_map->buffer);
-            custom_map->buffer = NULL;
+      if (ptr == (void *)mapped_ram) {
+         svcControlMemory(&tmp, mapped_ram, mapped_ram_src, size, MEMOP_UNMAP, 0);
+         ptr = (void *)mapped_ram_src;
+         mapped_ram = mapped_ram_src = 0;
+      }
+      for (i = 0; i < sizeof(mapped_addrs) / sizeof(mapped_addrs[0]); i++) {
+         if (ptr == (void *)mapped_addrs[i]) {
+            svcControlMemory(&tmp, mapped_addrs[i], 0, size, MEMOP_FREE, 0);
+            mapped_addrs[i] = 0;
             return;
          }
       }
    }
 
+   free(ptr);
+}
+
+// debug
+static int ctr_get_tlbe_k(u32 ptr)
+{
+   u32 tlb_base = -1, tlb_ctl = -1, *l1;
+   s32 tlb_mask = 0xffffc000;
+
+   asm volatile("mrc p15, 0, %0, c2, c0, 0" : "=r"(tlb_base));
+   asm volatile("mrc p15, 0, %0, c2, c0, 2" : "=r"(tlb_ctl));
+   tlb_mask >>= tlb_ctl & 7;
+   l1 = (u32 *)((tlb_base & tlb_mask) | 0xe0000000);
+   return l1[ptr >> 20];
+}
+
+static int ctr_get_tlbe(void *ptr)
+{
+   if (svcConvertVAToPA((void *)0xe0000000, 0) != 0x20000000)
+      return -1;
+   return svcCustomBackdoor(ctr_get_tlbe_k, ptr, NULL, NULL);
+}
+#endif
+
+#ifdef HAVE_LIBNX
+static void *pl_switch_mmap(unsigned long addr, size_t size,
+    enum psxMapTag tag, int *can_retry_addr)
+{
+   void *ret = MAP_FAILED;
+   *can_retry_addr = 0;
+   (void)addr;
+
+   // there's svcMapPhysicalMemory() but user logs show it doesn't hand out
+   // any desired addresses, so don't even bother
+   ret = aligned_alloc(0x1000, size);
+   if (!ret)
+      return MAP_FAILED;
+   memset(ret, 0, size);
+   return ret;
+}
+
+static void pl_switch_munmap(void *ptr, size_t size, enum psxMapTag tag)
+{
+   (void)size;
+   (void)tag;
    free(ptr);
 }
 #endif
@@ -475,7 +604,7 @@ typedef struct
 
 static void *addr = NULL;
 
-psx_map_t custom_psx_maps[] = {
+static psx_map_t custom_psx_maps[] = {
    { NULL, 0x800000, MAP_TAG_LUTS },
    { NULL, 0x080000, MAP_TAG_OTHER },
    { NULL, 0x010000, MAP_TAG_OTHER },
@@ -484,9 +613,8 @@ psx_map_t custom_psx_maps[] = {
    { NULL, 0x210000, MAP_TAG_RAM },
 };
 
-int init_vita_mmap()
+static int init_vita_mmap()
 {
-   int n;
    void *tmpaddr;
    addr = malloc(64 * 1024 * 1024);
    if (addr == NULL)
@@ -500,6 +628,7 @@ int init_vita_mmap()
    custom_psx_maps[5].buffer = tmpaddr + 0x2000000;
    memset(tmpaddr, 0, 0x2210000);
 #if 0
+   int n;
    for(n = 0; n < 5; n++){
    sceClibPrintf("addr reserved %x\n",custom_psx_maps[n].buffer);
    }
@@ -507,7 +636,7 @@ int init_vita_mmap()
    return 0;
 }
 
-void deinit_vita_mmap()
+static void deinit_vita_mmap()
 {
    size_t i;
    for (i = 0; i < sizeof(custom_psx_maps) / sizeof(custom_psx_maps[0]); i++) {
@@ -517,11 +646,12 @@ void deinit_vita_mmap()
    free(addr);
 }
 
-void *pl_vita_mmap(unsigned long addr, size_t size, int is_fixed,
-    enum psxMapTag tag)
+static void *pl_vita_mmap(unsigned long addr, size_t size,
+    enum psxMapTag tag, int *can_retry_addr)
 {
-   (void)is_fixed;
+   void *ret;
    (void)addr;
+   *can_retry_addr = 0;
 
    psx_map_t *custom_map = custom_psx_maps;
 
@@ -534,10 +664,11 @@ void *pl_vita_mmap(unsigned long addr, size_t size, int is_fixed,
       }
    }
 
-   return calloc(size, 1);
+   ret = calloc(size, 1);
+   return ret ? ret : MAP_FAILED;
 }
 
-void pl_vita_munmap(void *ptr, size_t size, enum psxMapTag tag)
+static void pl_vita_munmap(void *ptr, size_t size, enum psxMapTag tag)
 {
    (void)tag;
 
@@ -555,6 +686,22 @@ void pl_vita_munmap(void *ptr, size_t size, enum psxMapTag tag)
    free(ptr);
 }
 #endif
+
+static void log_mem_usage(void)
+{
+#ifdef _3DS
+   extern u32 __heap_size, __linear_heap_size, __stacksize__;
+   extern char __end__; // 3dsx.ld
+   u32 app_memory = *((volatile u32 *)0x1FF80040);
+   s64 mem_used = 0;
+   if (__ctr_svchax)
+      svcGetSystemInfo(&mem_used, 0, 1);
+
+   SysPrintf("mem: %d/%d heap: %d linear: %d/%d stack: %d exe: %d\n",
+      (int)mem_used, app_memory, __heap_size, __linear_heap_size - linearSpaceFree(),
+      __linear_heap_size, __stacksize__, (int)&__end__ - 0x100000);
+#endif
+}
 
 static void *pl_mmap(unsigned int size)
 {
@@ -582,7 +729,7 @@ struct rearmed_cbs pl_rearmed_cbs = {
 void pl_frame_limit(void)
 {
    /* called once per frame, make psxCpu->Execute() above return */
-   stop++;
+   psxRegs.stop++;
 }
 
 void pl_timing_prepare(int is_pal)
@@ -818,6 +965,7 @@ static bool update_option_visibility(void)
          struct retro_core_option_display option_display;
          char gpu_unai_option[][40] = {
             "pcsx_rearmed_gpu_unai_blending",
+            "pcsx_rearmed_gpu_unai_skipline",
             "pcsx_rearmed_gpu_unai_lighting",
             "pcsx_rearmed_gpu_unai_fast_lighting",
             "pcsx_rearmed_gpu_unai_scale_hires",
@@ -991,7 +1139,7 @@ void retro_get_system_info(struct retro_system_info *info)
 #endif
    memset(info, 0, sizeof(*info));
    info->library_name     = "PCSX-ReARMed";
-   info->library_version  = "r24l" GIT_VERSION;
+   info->library_version  = "r25" GIT_VERSION;
    info->valid_extensions = "bin|cue|img|mdf|pbp|toc|cbn|m3u|chd|iso|exe";
    info->need_fullpath    = true;
 }
@@ -1239,12 +1387,6 @@ static void disk_init(void)
    }
 }
 
-#ifdef HAVE_CDROM
-static long CALLBACK rcdrom_open(void);
-static long CALLBACK rcdrom_close(void);
-static void rcdrom_stop_thread(void);
-#endif
-
 static bool disk_set_eject_state(bool ejected)
 {
    if (ejected != disk_ejected)
@@ -1255,12 +1397,12 @@ static bool disk_set_eject_state(bool ejected)
    LidInterrupt();
 
 #ifdef HAVE_CDROM
-   if (CDR_open == rcdrom_open && ejected != disk_ejected) {
-      rcdrom_stop_thread();
+   if (cdra_is_physical() && ejected != disk_ejected) {
+      cdra_stop_thread();
       if (!ejected) {
          // likely the real cd was also changed - rescan
-         rcdrom_close();
-         rcdrom_open();
+         cdra_close();
+         cdra_open();
       }
    }
 #endif
@@ -1290,7 +1432,7 @@ static bool disk_set_image_index(unsigned int index)
    if (disks[index].fname == NULL)
    {
       LogErr("missing disk #%u\n", index);
-      CDR_shutdown();
+      cdra_shutdown();
 
       // RetroArch specifies "no disk" with index == count,
       // so don't fail here..
@@ -1308,7 +1450,7 @@ static bool disk_set_image_index(unsigned int index)
       LogErr("failed to load cdr plugin\n");
       return false;
    }
-   if (CDR_open() < 0)
+   if (cdra_open() < 0)
    {
       LogErr("failed to open cdr plugin\n");
       return false;
@@ -1517,308 +1659,6 @@ static void extract_directory(char *buf, const char *path, size_t size)
    }
 }
 
-// raw cdrom support
-#ifdef HAVE_CDROM
-#include "vfs/vfs_implementation.h"
-#include "vfs/vfs_implementation_cdrom.h"
-#include "libretro-cdrom.h"
-#include "rthreads/rthreads.h"
-#include "retro_timers.h"
-struct cached_buf {
-   unsigned char buf[2352];
-   unsigned int lba;
-};
-static struct {
-   libretro_vfs_implementation_file *h;
-   sthread_t *thread;
-   slock_t *read_lock;
-   slock_t *buf_lock;
-   scond_t *cond;
-   struct cached_buf *buf;
-   unsigned int buf_cnt, thread_exit, do_prefetch;
-   unsigned int total_lba, prefetch_lba;
-   int check_eject_delay;
-} rcdrom;
-
-static void lbacache_do(unsigned int lba)
-{
-   unsigned char m, s, f, buf[2352];
-   unsigned int i = lba % rcdrom.buf_cnt;
-   int ret;
-
-   cdrom_lba_to_msf(lba + 150, &m, &s, &f);
-   slock_lock(rcdrom.read_lock);
-   ret = cdrom_read_sector(rcdrom.h, lba, buf);
-   slock_lock(rcdrom.buf_lock);
-   slock_unlock(rcdrom.read_lock);
-   //printf("%d:%02d:%02d m%d f%d\n", m, s, f, buf[12+3], ((buf[12+4+2] >> 5) & 1) + 1);
-   if (ret) {
-      rcdrom.do_prefetch = 0;
-      slock_unlock(rcdrom.buf_lock);
-      LogErr("prefetch: cdrom_read_sector failed for lba %d\n", lba);
-      return;
-   }
-   rcdrom.check_eject_delay = 100;
-
-   if (lba != rcdrom.buf[i].lba) {
-      memcpy(rcdrom.buf[i].buf, buf, sizeof(rcdrom.buf[i].buf));
-      rcdrom.buf[i].lba = lba;
-   }
-   slock_unlock(rcdrom.buf_lock);
-   retro_sleep(0); // why does the main thread stall without this?
-}
-
-static int lbacache_get(unsigned int lba, void *buf)
-{
-   unsigned int i;
-   int ret = 0;
-
-   i = lba % rcdrom.buf_cnt;
-   slock_lock(rcdrom.buf_lock);
-   if (lba == rcdrom.buf[i].lba) {
-      memcpy(buf, rcdrom.buf[i].buf, 2352);
-      ret = 1;
-   }
-   slock_unlock(rcdrom.buf_lock);
-   return ret;
-}
-
-static void rcdrom_prefetch_thread(void *unused)
-{
-   unsigned int buf_cnt, lba, lba_to;
-
-   slock_lock(rcdrom.buf_lock);
-   while (!rcdrom.thread_exit)
-   {
-#ifdef __GNUC__
-      __asm__ __volatile__("":::"memory"); // barrier
-#endif
-      if (!rcdrom.do_prefetch)
-         scond_wait(rcdrom.cond, rcdrom.buf_lock);
-      if (!rcdrom.do_prefetch || !rcdrom.h || rcdrom.thread_exit)
-         continue;
-
-      buf_cnt = rcdrom.buf_cnt;
-      lba = rcdrom.prefetch_lba;
-      lba_to = lba + buf_cnt;
-      if (lba_to > rcdrom.total_lba)
-         lba_to = rcdrom.total_lba;
-      for (; lba < lba_to; lba++) {
-         if (lba != rcdrom.buf[lba % buf_cnt].lba)
-            break;
-      }
-      if (lba == lba_to) {
-         // caching complete
-         rcdrom.do_prefetch = 0;
-         continue;
-      }
-
-      slock_unlock(rcdrom.buf_lock);
-      lbacache_do(lba);
-      slock_lock(rcdrom.buf_lock);
-   }
-   slock_unlock(rcdrom.buf_lock);
-}
-
-static void rcdrom_stop_thread(void)
-{
-   rcdrom.thread_exit = 1;
-   if (rcdrom.buf_lock) {
-      slock_lock(rcdrom.buf_lock);
-      rcdrom.do_prefetch = 0;
-      if (rcdrom.cond)
-         scond_signal(rcdrom.cond);
-      slock_unlock(rcdrom.buf_lock);
-   }
-   if (rcdrom.thread) {
-      sthread_join(rcdrom.thread);
-      rcdrom.thread = NULL;
-   }
-   if (rcdrom.cond) { scond_free(rcdrom.cond); rcdrom.cond = NULL; }
-   if (rcdrom.buf_lock) { slock_free(rcdrom.buf_lock); rcdrom.buf_lock = NULL; }
-   if (rcdrom.read_lock) { slock_free(rcdrom.read_lock); rcdrom.read_lock = NULL; }
-   free(rcdrom.buf);
-   rcdrom.buf = NULL;
-}
-
-// the thread is optional, if anything fails we can do direct reads
-static void rcdrom_start_thread(void)
-{
-   rcdrom_stop_thread();
-   rcdrom.thread_exit = rcdrom.prefetch_lba = rcdrom.do_prefetch = 0;
-   if (rcdrom.buf_cnt == 0)
-      return;
-   rcdrom.buf = calloc(rcdrom.buf_cnt, sizeof(rcdrom.buf[0]));
-   rcdrom.buf_lock = slock_new();
-   rcdrom.read_lock = slock_new();
-   rcdrom.cond = scond_new();
-   if (rcdrom.buf && rcdrom.buf_lock && rcdrom.read_lock && rcdrom.cond) {
-      rcdrom.thread = sthread_create(rcdrom_prefetch_thread, NULL);
-      rcdrom.buf[0].lba = ~0;
-   }
-   if (!rcdrom.thread) {
-      LogErr("cdrom precache thread init failed.\n");
-      rcdrom_stop_thread();
-   }
-}
-
-static long CALLBACK rcdrom_open(void)
-{
-   const char *name = GetIsoFile();
-   //printf("%s %s\n", __func__, name);
-   rcdrom.h = retro_vfs_file_open_impl(name, RETRO_VFS_FILE_ACCESS_READ,
-      RETRO_VFS_FILE_ACCESS_HINT_NONE);
-   if (rcdrom.h) {
-      int ret = cdrom_set_read_speed_x(rcdrom.h, 4);
-      if (ret) LogErr("CD speed set failed\n");
-      const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
-      const cdrom_track_t *last = &toc->track[toc->num_tracks - 1];
-      unsigned int lba = cdrom_msf_to_lba(last->min, last->sec, last->frame) - 150;
-      rcdrom.total_lba = lba + last->track_size;
-      //cdrom_get_current_config_random_readable(rcdrom.h);
-      //cdrom_get_current_config_multiread(rcdrom.h);
-      //cdrom_get_current_config_cdread(rcdrom.h);
-      //cdrom_get_current_config_profiles(rcdrom.h);
-      rcdrom_start_thread();
-      return 0;
-   }
-   LogErr("retro_vfs_file_open failed for '%s'\n", name);
-   return -1;
-}
-
-static long CALLBACK rcdrom_close(void)
-{
-   //printf("%s\n", __func__);
-   if (rcdrom.h) {
-      rcdrom_stop_thread();
-      retro_vfs_file_close_impl(rcdrom.h);
-      rcdrom.h = NULL;
-   }
-   return 0;
-}
-
-static long CALLBACK rcdrom_getTN(unsigned char *tn)
-{
-   const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
-   tn[0] = 1;
-   tn[1] = toc->num_tracks;
-   //printf("%s -> %d %d\n", __func__, tn[0], tn[1]);
-   return 0;
-}
-
-static long CALLBACK rcdrom_getTD(unsigned char track, unsigned char *rt)
-{
-   const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
-   rt[0] = 0, rt[1] = 2, rt[2] = 0;
-   if (track == 0) {
-      cdrom_lba_to_msf(rcdrom.total_lba + 150, &rt[2], &rt[1], &rt[0]);
-   }
-   else if (track <= toc->num_tracks) {
-      int i = track - 1;
-      rt[2] = toc->track[i].min;
-      rt[1] = toc->track[i].sec;
-      rt[0] = toc->track[i].frame;
-   }
-   //printf("%s %d -> %d:%02d:%02d\n", __func__, track, rt[2], rt[1], rt[0]);
-   return 0;
-}
-
-static long CALLBACK rcdrom_prefetch(unsigned char m, unsigned char s, unsigned char f)
-{
-   unsigned int lba = cdrom_msf_to_lba(m, s, f) - 150;
-   if (rcdrom.cond && rcdrom.h) {
-      rcdrom.prefetch_lba = lba;
-      rcdrom.do_prefetch = 1;
-      scond_signal(rcdrom.cond);
-   }
-   if (rcdrom.buf) {
-     unsigned int c = rcdrom.buf_cnt;
-     if (c)
-        return rcdrom.buf[lba % c].lba == lba;
-   }
-   return 1;
-}
-
-static int rcdrom_read_msf(unsigned char m, unsigned char s, unsigned char f,
-      void *buf, const char *func)
-{
-   unsigned int lba = cdrom_msf_to_lba(m, s, f) - 150;
-   int hit = 0, ret = -1;
-   if (rcdrom.buf_lock)
-      hit = lbacache_get(lba, buf);
-   if (!hit && rcdrom.read_lock) {
-      // maybe still prefetching
-      slock_lock(rcdrom.read_lock);
-      slock_unlock(rcdrom.read_lock);
-      hit = lbacache_get(lba, buf);
-      if (hit)
-         hit = 2;
-   }
-   if (!hit) {
-      slock_t *lock = rcdrom.read_lock;
-      rcdrom.do_prefetch = 0;
-      if (lock)
-         slock_lock(lock);
-      if (rcdrom.h) {
-         ret = cdrom_read_sector(rcdrom.h, lba, buf);
-         if (ret)
-            LogErr("cdrom_read_sector failed for lba %d\n", lba);
-      }
-      if (lock)
-         slock_unlock(lock);
-   }
-   else
-      ret = 0;
-   rcdrom.check_eject_delay = ret ? 0 : 100;
-   //printf("%s %d:%02d:%02d -> %d hit %d\n", func, m, s, f, ret, hit);
-   return ret;
-}
-
-static boolean CALLBACK rcdrom_readTrack(unsigned char *time)
-{
-   unsigned char m = btoi(time[0]), s = btoi(time[1]), f = btoi(time[2]);
-   return !rcdrom_read_msf(m, s, f, ISOgetBuffer() - 12, __func__);
-}
-
-static long CALLBACK rcdrom_readCDDA(unsigned char m, unsigned char s, unsigned char f,
-      unsigned char *buffer)
-{
-   return rcdrom_read_msf(m, s, f, buffer, __func__);
-}
-
-static unsigned char * CALLBACK rcdrom_getBuffer(void)
-{
-   //printf("%s\n", __func__);
-   return ISOgetBuffer();
-}
-
-static unsigned char * CALLBACK rcdrom_getBufferSub(int sector)
-{
-   //printf("%s %d %d\n", __func__, sector, rcdrom_h->cdrom.last_frame_lba);
-   return NULL;
-}
-
-static long CALLBACK rcdrom_getStatus(struct CdrStat *stat)
-{
-   const cdrom_toc_t *toc = retro_vfs_file_get_cdrom_toc();
-   //printf("%s %p\n", __func__, stat);
-   CDR__getStatus(stat);
-   stat->Type = toc->track[0].audio ? 2 : 1;
-   return 0;
-}
-
-static void rcdrom_check_eject(void)
-{
-   bool media_inserted;
-   if (!rcdrom.h || rcdrom.do_prefetch || rcdrom.check_eject_delay-- > 0)
-      return;
-   rcdrom.check_eject_delay = 100;
-   media_inserted = cdrom_is_media_inserted(rcdrom.h); // 1-2ms
-   if (!media_inserted != disk_ejected)
-      disk_set_eject_state(!media_inserted);
-}
-#endif // HAVE_CDROM
-
 #if defined(__QNX__) || defined(_WIN32)
 /* Blackberry QNX doesn't have strcasestr */
 
@@ -1851,17 +1691,21 @@ strcasestr(const char *s, const char *find)
 
 static void set_retro_memmap(void)
 {
-#ifndef NDEBUG
+   uint64_t flags_ram = RETRO_MEMDESC_SYSTEM_RAM;
    struct retro_memory_map retromap = { 0 };
-   struct retro_memory_descriptor mmap = {
-      0, psxM, 0, 0, 0, 0, 0x200000
+   struct retro_memory_descriptor descs[] = {
+      { flags_ram, psxM, 0, 0x00000000, 0x5fe00000, 0, 0x200000 },
+      { flags_ram, psxH, 0, 0x1f800000, 0x7ffffc00, 0, 0x000400 },
+      // not ram but let the frontend patch it if it wants; should be last
+      { flags_ram, psxR, 0, 0x1fc00000, 0x5ff80000, 0, 0x080000 },
    };
 
-   retromap.descriptors = &mmap;
-   retromap.num_descriptors = 1;
+   retromap.descriptors = descs;
+   retromap.num_descriptors = sizeof(descs) / sizeof(descs[0]);
+   if (Config.HLE)
+      retromap.num_descriptors--;
 
    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &retromap);
-#endif
 }
 
 static void show_notification(const char *msg_str,
@@ -1946,12 +1790,25 @@ static void retro_set_audio_buff_status_cb(void)
 }
 
 static void update_variables(bool in_flight);
+
+static int get_bool_variable(const char *key)
+{
+   struct retro_variable var = { NULL, };
+
+   var.key = key;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "enabled") == 0)
+         return 1;
+   }
+   return 0;
+}
+
 bool retro_load_game(const struct retro_game_info *info)
 {
    size_t i;
    unsigned int cd_index = 0;
-   bool is_m3u = (strcasestr(info->path, ".m3u") != NULL);
-   bool is_exe = (strcasestr(info->path, ".exe") != NULL);
+   bool is_m3u, is_exe;
    int ret;
 
    struct retro_input_descriptor desc[] = {
@@ -1994,23 +1851,24 @@ bool retro_load_game(const struct retro_game_info *info)
       { 0 },
    };
 
-   frame_count = 0;
-
    environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, desc);
 
-#ifdef FRONTEND_SUPPORTS_RGB565
-   enum retro_pixel_format fmt = RETRO_PIXEL_FORMAT_RGB565;
+   enum retro_pixel_format fmt = get_bool_variable("pcsx_rearmed_rgb32_output")
+      ? RETRO_PIXEL_FORMAT_XRGB8888 : RETRO_PIXEL_FORMAT_RGB565;
    if (environ_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT, &fmt))
-   {
-      SysPrintf("RGB565 supported, using it\n");
-   }
-#endif
+      current_fmt = fmt;
+   else
+      LogErr("SET_PIXEL_FORMAT failed\n");
+   SysPrintf("Using PIXEL_FORMAT %d\n", current_fmt);
+   set_bgr_to_fb_func(0);
 
    if (info == NULL || info->path == NULL)
    {
       LogErr("info->path required\n");
       return false;
    }
+   is_m3u = (strcasestr(info->path, ".m3u") != NULL);
+   is_exe = (strcasestr(info->path, ".exe") != NULL);
 
    update_variables(false);
 
@@ -2066,18 +1924,7 @@ bool retro_load_game(const struct retro_game_info *info)
    }
    if (!strncmp(info->path, "cdrom:", 6))
    {
-#ifdef HAVE_CDROM
-      CDR_open = rcdrom_open;
-      CDR_close = rcdrom_close;
-      CDR_getTN = rcdrom_getTN;
-      CDR_getTD = rcdrom_getTD;
-      CDR_readTrack = rcdrom_readTrack;
-      CDR_getBuffer = rcdrom_getBuffer;
-      CDR_getBufferSub = rcdrom_getBufferSub;
-      CDR_getStatus = rcdrom_getStatus;
-      CDR_readCDDA = rcdrom_readCDDA;
-      CDR_prefetch = rcdrom_prefetch;
-#elif !defined(USE_LIBRETRO_VFS)
+#if !defined(HAVE_CDROM) && !defined(USE_LIBRETRO_VFS)
       ReleasePlugins();
       LogErr("%s\n", "Physical CD-ROM support is not compiled in.");
       show_notification("Physical CD-ROM support is not compiled in.", 6000, 3);
@@ -2086,7 +1933,6 @@ bool retro_load_game(const struct retro_game_info *info)
    }
 
    plugins_opened = 1;
-   NetOpened = 0;
 
    if (OpenPlugins() == -1)
    {
@@ -2152,7 +1998,7 @@ bool retro_load_game(const struct retro_game_info *info)
             LogErr("failed to reload cdr plugins\n");
             return false;
          }
-         if (CDR_open() < 0)
+         if (cdra_open() < 0)
          {
             LogErr("failed to open cdr plugin\n");
             return false;
@@ -2164,15 +2010,13 @@ bool retro_load_game(const struct retro_game_info *info)
    for (i = 0; i < 8; ++i)
       in_type[i] = PSE_PAD_TYPE_STANDARD;
 
-   plugin_call_rearmed_cbs();
-   /* dfinput_activate(); */
-
    if (!is_exe && CheckCdrom() == -1)
    {
       LogErr("unsupported/invalid CD image: %s\n", info->path);
       return false;
    }
 
+   plugin_call_rearmed_cbs();
    SysReset();
 
    if (is_exe)
@@ -2188,6 +2032,7 @@ bool retro_load_game(const struct retro_game_info *info)
 
    set_retro_memmap();
    retro_set_audio_buff_status_cb();
+   log_mem_usage();
 
    if (check_unsatisfied_libcrypt())
       show_notification("LibCrypt protected game with missing SBI detected", 3000, 3);
@@ -2350,7 +2195,7 @@ static void update_variables(bool in_flight)
       {
          axis_bounds_modifier = true;
       }
-      else if (strcmp(var.value, "circle") == 0)
+      else
       {
          axis_bounds_modifier = false;
       }
@@ -2396,23 +2241,20 @@ static void update_variables(bool in_flight)
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      if (strcmp(var.value, "disabled") == 0)
+      if (strcmp(var.value, "force") == 0)
       {
-         pl_rearmed_cbs.gpu_peops.iUseDither = 0;
-         pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 0;
-         pl_rearmed_cbs.gpu_unai.dithering = 0;
-#ifdef GPU_NEON
-         pl_rearmed_cbs.gpu_neon.allow_dithering = 0;
-#endif
-      }
-      else if (strcmp(var.value, "enabled") == 0)
-      {
-         pl_rearmed_cbs.gpu_peops.iUseDither    = 1;
+         pl_rearmed_cbs.dithering = 2;
          pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 1;
-         pl_rearmed_cbs.gpu_unai.dithering = 1;
-#ifdef GPU_NEON
-         pl_rearmed_cbs.gpu_neon.allow_dithering = 1;
-#endif
+      }
+      else if (strcmp(var.value, "disabled") == 0)
+      {
+         pl_rearmed_cbs.dithering = 0;
+         pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 0;
+      }
+      else
+      {
+         pl_rearmed_cbs.dithering = 1;
+         pl_rearmed_cbs.gpu_peopsgl.bDrawDither = 1;
       }
    }
 
@@ -2453,7 +2295,7 @@ static void update_variables(bool in_flight)
    }
 
    var.value = NULL;
-   var.key = "pcsx_rearmed_neon_enhancement_tex_adj";
+   var.key = "pcsx_rearmed_neon_enhancement_tex_adj_v2";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
@@ -2465,14 +2307,16 @@ static void update_variables(bool in_flight)
 #endif
 
    var.value = NULL;
-   var.key = "pcsx_rearmed_display_internal_fps";
+   var.key = "pcsx_rearmed_display_fps_v2";
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      if (strcmp(var.value, "disabled") == 0)
-         display_internal_fps = false;
+      if (strcmp(var.value, "extra") == 0)
+         display_internal_fps = 2;
       else if (strcmp(var.value, "enabled") == 0)
-         display_internal_fps = true;
+         display_internal_fps = 1;
+      else
+         display_internal_fps = 0;
    }
 
    var.value = NULL;
@@ -2485,23 +2329,12 @@ static void update_variables(bool in_flight)
          Config.TurboCD = false;
    }
 
-#ifdef HAVE_CDROM
+#if defined(HAVE_CDROM) || defined(USE_ASYNC_CDROM)
    var.value = NULL;
-   var.key = "pcsx_rearmed_phys_cd_readahead";
+   var.key = "pcsx_rearmed_cd_readahead";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
-      long newval = strtol(var.value, NULL, 10);
-      bool changed = rcdrom.buf_cnt != newval;
-      if (rcdrom.h && changed)
-         rcdrom_stop_thread();
-      rcdrom.buf_cnt = newval;
-      if (rcdrom.h && changed) {
-         rcdrom_start_thread();
-         if (rcdrom.cond && rcdrom.prefetch_lba) {
-            rcdrom.do_prefetch = 1;
-            scond_signal(rcdrom.cond);
-         }
-      }
+      cdra_set_buf_count(strtol(var.value, NULL, 10));
    }
 #endif
 
@@ -2533,29 +2366,45 @@ static void update_variables(bool in_flight)
          prev_cpu->Notify(R3000ACPU_NOTIFY_BEFORE_SAVE, NULL);
          prev_cpu->Shutdown();
          psxCpu->Init();
-         psxCpu->Reset();
          psxCpu->Notify(R3000ACPU_NOTIFY_AFTER_LOAD, NULL);
       }
    }
-#endif /* !DRC_DISABLE */
+#endif // !DRC_DISABLE
 
    var.value = NULL;
    var.key = "pcsx_rearmed_psxclock";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       int psxclock = atoi(var.value);
-      Config.cycle_multiplier = 10000 / psxclock;
+      if (strcmp(var.value, "auto") == 0 || psxclock == 0)
+         Config.cycle_multiplier = CYCLE_MULT_DEFAULT;
+      else
+         Config.cycle_multiplier = 10000 / psxclock;
    }
 
 #if !defined(DRC_DISABLE) && !defined(LIGHTREC)
+#ifdef NDRC_THREAD
+   var.value = NULL;
+   var.key = "pcsx_rearmed_drc_thread";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      ndrc_g.hacks &= ~(NDHACK_THREAD_FORCE | NDHACK_THREAD_FORCE_ON);
+      if (strcmp(var.value, "disabled") == 0)
+         ndrc_g.hacks |= NDHACK_THREAD_FORCE;
+      else if (strcmp(var.value, "enabled") == 0)
+         ndrc_g.hacks |= NDHACK_THREAD_FORCE | NDHACK_THREAD_FORCE_ON;
+      // psxCpu->ApplyConfig(); will start/stop the thread
+   }
+#endif
+
    var.value = NULL;
    var.key = "pcsx_rearmed_nosmccheck";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       if (strcmp(var.value, "enabled") == 0)
-         new_dynarec_hacks |= NDHACK_NO_SMC_CHECK;
+         ndrc_g.hacks |= NDHACK_NO_SMC_CHECK;
       else
-         new_dynarec_hacks &= ~NDHACK_NO_SMC_CHECK;
+         ndrc_g.hacks &= ~NDHACK_NO_SMC_CHECK;
    }
 
    var.value = NULL;
@@ -2563,9 +2412,9 @@ static void update_variables(bool in_flight)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       if (strcmp(var.value, "enabled") == 0)
-         new_dynarec_hacks |= NDHACK_GTE_UNNEEDED;
+         ndrc_g.hacks |= NDHACK_GTE_UNNEEDED;
       else
-         new_dynarec_hacks &= ~NDHACK_GTE_UNNEEDED;
+         ndrc_g.hacks &= ~NDHACK_GTE_UNNEEDED;
    }
 
    var.value = NULL;
@@ -2573,9 +2422,9 @@ static void update_variables(bool in_flight)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       if (strcmp(var.value, "enabled") == 0)
-         new_dynarec_hacks |= NDHACK_GTE_NO_FLAGS;
+         ndrc_g.hacks |= NDHACK_GTE_NO_FLAGS;
       else
-         new_dynarec_hacks &= ~NDHACK_GTE_NO_FLAGS;
+         ndrc_g.hacks &= ~NDHACK_GTE_NO_FLAGS;
    }
 
    var.value = NULL;
@@ -2583,9 +2432,9 @@ static void update_variables(bool in_flight)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       if (strcmp(var.value, "enabled") == 0)
-         new_dynarec_hacks |= NDHACK_NO_COMPAT_HACKS;
+         ndrc_g.hacks |= NDHACK_NO_COMPAT_HACKS;
       else
-         new_dynarec_hacks &= ~NDHACK_NO_COMPAT_HACKS;
+         ndrc_g.hacks &= ~NDHACK_NO_COMPAT_HACKS;
    }
 #endif /* !DRC_DISABLE && !LIGHTREC */
 
@@ -2662,31 +2511,6 @@ static void update_variables(bool in_flight)
    }
 #endif
 
-#if 0 // currently disabled, see USE_READ_THREAD in libpcsxcore/cdriso.c
-   if (P_HAVE_PTHREAD) {
-	   var.value = NULL;
-	   var.key = "pcsx_rearmed_async_cd";
-	   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-	   {
-		  if (strcmp(var.value, "async") == 0)
-		  {
-			 Config.AsyncCD = 1;
-			 Config.CHD_Precache = 0;
-		  }
-		  else if (strcmp(var.value, "sync") == 0)
-		  {
-			 Config.AsyncCD = 0;
-			 Config.CHD_Precache = 0;
-		  }
-		  else if (strcmp(var.value, "precache") == 0)
-		  {
-			 Config.AsyncCD = 0;
-			 Config.CHD_Precache = 1;
-		  }
-       }
-   }
-#endif
-
    var.value = NULL;
    var.key = "pcsx_rearmed_noxadecoding";
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
@@ -2757,6 +2581,13 @@ static void update_variables(bool in_flight)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
    {
       pl_rearmed_cbs.screen_centering_y = atoi(var.value);
+   }
+
+   var.value = NULL;
+   var.key = "pcsx_rearmed_screen_centering_h_adj";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      pl_rearmed_cbs.screen_centering_h_adj = atoi(var.value);
    }
 
    var.value = NULL;
@@ -2869,10 +2700,28 @@ static void update_variables(bool in_flight)
     * (480i, 512i) and has been obsoleted by
     * pcsx_rearmed_gpu_unai_scale_hires */
    pl_rearmed_cbs.gpu_unai.ilace_force = 0;
-   /* Note: This used to be an option, but it has no
-    * discernable effect and has been obsoleted by
-    * pcsx_rearmed_gpu_unai_scale_hires */
-   pl_rearmed_cbs.gpu_unai.pixel_skip = 0;
+
+   var.key = "pcsx_rearmed_gpu_unai_old_renderer";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_unai.old_renderer = 1;
+      else
+         pl_rearmed_cbs.gpu_unai.old_renderer = 0;
+   }
+
+   var.key = "pcsx_rearmed_gpu_unai_skipline";
+   var.value = NULL;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         pl_rearmed_cbs.gpu_unai.ilace_force = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         pl_rearmed_cbs.gpu_unai.ilace_force = 1;
+   }
 
    var.key = "pcsx_rearmed_gpu_unai_lighting";
    var.value = NULL;
@@ -3011,6 +2860,15 @@ static void update_variables(bool in_flight)
       mouse_sensitivity = atof(var.value);
    }
 
+#ifdef _3DS
+   var.value = NULL;
+   var.key = "pcsx_rearmed_3ds_appcputime";
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      APT_SetAppCpuTimeLimit(strtol(var.value, NULL, 10));
+   }
+#endif
+
    if (found_bios)
    {
       var.value = NULL;
@@ -3078,26 +2936,19 @@ static uint16_t get_analog_button(int16_t ret, retro_input_state_t input_state_c
    return button;
 }
 
-unsigned char axis_range_modifier(int16_t axis_value, bool is_square)
+static unsigned char axis_range_modifier(int axis_value, bool is_square)
 {
-   float modifier_axis_range = 0;
+   int modifier_axis_range;
 
    if (is_square)
-   {
-      modifier_axis_range = round((axis_value >> 8) / 0.785) + 128;
-      if (modifier_axis_range < 0)
-      {
-         modifier_axis_range = 0;
-      }
-      else if (modifier_axis_range > 255)
-      {
-         modifier_axis_range = 255;
-      }
-   }
+      modifier_axis_range = roundf((axis_value >> 8) / 0.785f) + 128;
    else
-   {
-      modifier_axis_range = MIN(((axis_value >> 8) + 128), 255);
-   }
+      modifier_axis_range = (axis_value >> 8) + 128;
+
+   if (modifier_axis_range < 0)
+      modifier_axis_range = 0;
+   else if (modifier_axis_range > 255)
+      modifier_axis_range = 255;
 
    return modifier_axis_range;
 }
@@ -3385,24 +3236,50 @@ static void print_internal_fps(void)
 {
    if (display_internal_fps)
    {
-      frame_count++;
+      static u32 fps, frame_count_s;
+      static time_t last_time;
+      static u32 psx_vsync_count;
+      u32 psx_vsync_rate = is_pal_mode ? 50 : 60;
+      time_t now;
 
-      if (frame_count % INTERNAL_FPS_SAMPLE_PERIOD == 0)
+      psx_vsync_count++;
+      frame_count_s++;
+      now = time(NULL);
+      if (now != last_time)
       {
-         unsigned internal_fps = pl_rearmed_cbs.flip_cnt * (is_pal_mode ? 50 : 60) / INTERNAL_FPS_SAMPLE_PERIOD;
+         fps = frame_count_s;
+         frame_count_s = 0;
+         last_time = now;
+      }
+
+      if (psx_vsync_count >= psx_vsync_rate)
+      {
+         int pos = 0, cd_count;
          char str[64];
-         const char *strc = (const char *)str;
 
-         str[0] = '\0';
-
-         snprintf(str, sizeof(str), "Internal FPS: %2d", internal_fps);
+         if (display_internal_fps > 1) {
+#if !defined(DRC_DISABLE) && !defined(LIGHTREC)
+            if (ndrc_g.did_compile) {
+               pos = snprintf(str, sizeof(str), "DRC: %d ", ndrc_g.did_compile);
+               ndrc_g.did_compile = 0;
+            }
+#endif
+            cd_count = cdra_get_buf_count();
+            if (cd_count) {
+               pos += snprintf(str + pos, sizeof(str) - pos, "CD: %2d/%d ",
+                     cdra_get_buf_cached_approx(), cd_count);
+            }
+         }
+         snprintf(str + pos, sizeof(str) - pos, "FPS: %2d/%2d",
+               pl_rearmed_cbs.flip_cnt, fps);
 
          pl_rearmed_cbs.flip_cnt = 0;
+         psx_vsync_count = 0;
 
          if (msg_interface_version >= 1)
          {
             struct retro_message_ext msg = {
-               strc,
+               str,
                3000,
                1,
                RETRO_LOG_INFO,
@@ -3415,15 +3292,13 @@ static void print_internal_fps(void)
          else
          {
             struct retro_message msg = {
-               strc,
+               str,
                180
             };
             environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &msg);
          }
       }
    }
-   else
-      frame_count = 0;
 }
 
 void retro_run(void)
@@ -3488,8 +3363,8 @@ void retro_run(void)
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
       update_variables(true);
 
-   stop = 0;
-   psxCpu->Execute();
+   psxRegs.stop = 0;
+   psxCpu->Execute(&psxRegs);
 
    if (pl_rearmed_cbs.fskip_dirty == 1) {
       if (frameskip_counter < frameskip_interval)
@@ -3499,12 +3374,16 @@ void retro_run(void)
    }
 
    video_cb((vout_fb_dirty || !vout_can_dupe) ? vout_buf_ptr : NULL,
-       vout_width, vout_height, vout_pitch * 2);
+       vout_width, vout_height, vout_pitch_b);
    vout_fb_dirty = 0;
 
 #ifdef HAVE_CDROM
-   if (CDR_open == rcdrom_open)
-      rcdrom_check_eject();
+   int inserted;
+   if (cdra_check_eject(&inserted) > 0) {
+      bool media_inserted = inserted != 0;
+      if (!media_inserted != disk_ejected)
+         disk_set_eject_state(!media_inserted);
+   }
 #endif
 }
 
@@ -3725,6 +3604,8 @@ void retro_init(void)
    struct retro_rumble_interface rumble;
    int ret;
 
+   log_mem_usage();
+
    msg_interface_version = 0;
    environ_cb(RETRO_ENVIRONMENT_GET_MESSAGE_INTERFACE_VERSION, &msg_interface_version);
 
@@ -3733,11 +3614,13 @@ void retro_init(void)
    syscall(SYS_ptrace, 0 /*PTRACE_TRACEME*/, 0, 0, 0);
 #endif
 
-#ifdef _3DS
+#if defined(_3DS)
    psxMapHook = pl_3ds_mmap;
    psxUnmapHook = pl_3ds_munmap;
-#endif
-#ifdef VITA
+#elif defined(HAVE_LIBNX)
+   psxMapHook = pl_switch_mmap;
+   psxUnmapHook = pl_switch_munmap;
+#elif defined(VITA)
    if (init_vita_mmap() < 0)
       abort();
    psxMapHook = pl_vita_mmap;
@@ -3758,16 +3641,32 @@ void retro_init(void)
       exit(1);
    }
 
+   // alloc enough for RETRO_PIXEL_FORMAT_XRGB8888
+   size_t vout_buf_size = VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 4;
 #ifdef _3DS
-   vout_buf = linearMemAlign(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2, 0x80);
+   // Place psx vram in linear mem to take advantage of it's supersection mapping.
+   // The emu allocs 2x (0x201000 to be exact) but doesn't really need that much,
+   // so place vout_buf below to also act as an overdraw guard.
+   vram_mem = linearMemAlign(1024*1024 + 4096 + vout_buf_size, 4096);
+   if (vram_mem) {
+      vout_buf = (char *)vram_mem + 1024*1024 + 4096;
+      if (__ctr_svchax)
+         SysPrintf("vram: %p PA %08x tlb %08x\n", vram_mem,
+               svcConvertVAToPA(vram_mem, 0), ctr_get_tlbe(vram_mem));
+   }
 #elif defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && P_HAVE_POSIX_MEMALIGN
-   if (posix_memalign(&vout_buf, 16, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2) != 0)
-      vout_buf = (void *) 0;
+   if (posix_memalign(&vout_buf, 16, vout_buf_size) != 0)
+      vout_buf = NULL;
    else
-      memset(vout_buf, 0, VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT * 2);
+      memset(vout_buf, 0, vout_buf_size);
 #else
-   vout_buf = calloc(VOUT_MAX_WIDTH * VOUT_MAX_HEIGHT, 2);
+   vout_buf = calloc(vout_buf_size, 1);
 #endif
+   if (vout_buf == NULL)
+   {
+      LogErr("OOM for vout_buf.\n");
+      // may be able to continue if we get retro_framebuffer access
+   }
 
    vout_buf_ptr = vout_buf;
 
@@ -3788,14 +3687,6 @@ void retro_init(void)
    if (environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumble))
       rumble_cb = rumble.set_rumble_state;
 
-   /* Set how much slower PSX CPU runs * 100 (so that 200 is 2 times)
-    * we have to do this because cache misses and some IO penalties
-    * are not emulated. Warning: changing this may break compatibility. */
-   Config.cycle_multiplier = CYCLE_MULT_DEFAULT;
-#if defined(HAVE_PRE_ARMV7) && !defined(_3DS)
-   Config.cycle_multiplier = 200;
-#endif
-   pl_rearmed_cbs.gpu_peops.iUseDither = 1;
    pl_rearmed_cbs.gpu_peops.dwActFixes = GPU_PEOPS_OLD_FRAME_SKIP;
 
    SaveFuncs.open = save_open;
@@ -3819,7 +3710,8 @@ void retro_deinit(void)
    }
    SysClose();
 #ifdef _3DS
-   linearFree(vout_buf);
+   linearFree(vram_mem);
+   vram_mem = NULL;
 #else
    free(vout_buf);
 #endif
@@ -3852,14 +3744,6 @@ void retro_deinit(void)
    retro_audio_latency        = 0;
    update_audio_latency       = false;
 }
-
-#ifdef VITA
-#include <psp2/kernel/threadmgr.h>
-int usleep(unsigned long us)
-{
-   sceKernelDelayThread(us);
-}
-#endif
 
 void SysPrintf(const char *fmt, ...)
 {

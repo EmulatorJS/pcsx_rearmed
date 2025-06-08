@@ -21,9 +21,19 @@
 
 #define SPAN_DATA_BLOCKS_SIZE 32
 
+#define AHACK_TEXTURE_ADJ_U   (1 << 0)
+#define AHACK_TEXTURE_ADJ_V   (1 << 1)
+
 #ifndef __ASSEMBLER__
 
 #include "vector_types.h"
+
+#ifndef unlikely
+#define unlikely(x) __builtin_expect((x), 0)
+#endif
+
+#define sign_extend_11bit(value) \
+  (((s32)((value) << 21)) >> 21)
 
 typedef enum
 {
@@ -189,6 +199,7 @@ typedef struct
   // enhancement stuff
   u16 *enhancement_buf_ptr;          // main alloc
   u16 *enhancement_current_buf_ptr;  // offset into above, 4 bufs
+  u32 hacks_active;                  // AHACK_TEXTURE_ADJ_U ...
   u32 saved_hres;
   s16 saved_viewport_start_x;
   s16 saved_viewport_start_y;
@@ -200,12 +211,18 @@ typedef struct
   u16 enhancement_scanout_eselect;   // eviction selector
   u16 enhancement_current_buf;
 
+  u32 allow_dithering:1;
+  u32 force_dithering:1;
   u32 hack_disable_main:1;
   u32 hack_texture_adj:1;
 
   // Align up to 64 byte boundary to keep the upcoming buffers cache line
   // aligned, also make reachable with single immediate addition
-  u8 reserved_a[184 + 9*4 - 9*sizeof(void *)];
+  u8 reserved_a[68 + 9*4 - 9*sizeof(void *)];
+
+  // space for saving regs on c call to flush_render_block_buffer() and asm
+  u32 saved_tmp[48 / sizeof(u32)];
+  u32 saved_q4_q7[64 / sizeof(u32)];
 
   // 8KB
   block_struct blocks[MAX_BLOCKS_PER_ROW];
@@ -218,7 +235,6 @@ typedef struct
   u8 texture_4bpp_cache[32][256 * 256];
   u8 texture_8bpp_even_cache[16][256 * 256];
   u8 texture_8bpp_odd_cache[16][256 * 256];
-  int use_dithering;
 } psx_gpu_struct;
 
 typedef struct __attribute__((aligned(16)))
@@ -238,6 +254,13 @@ typedef struct __attribute__((aligned(16)))
   u32 padding;
 } vertex_struct;
 
+typedef struct
+{
+  vertex_struct *vertexes[3];
+  s16 offset_x;
+  s16 offset_y;
+} prepared_triangle;
+
 void render_block_fill(psx_gpu_struct *psx_gpu, u32 color, u32 x, u32 y,
  u32 width, u32 height);
 void render_block_copy(psx_gpu_struct *psx_gpu, u16 *source, u32 x, u32 y,
@@ -256,6 +279,9 @@ u32 texture_region_mask(s32 x1, s32 y1, s32 x2, s32 y2);
 
 void update_texture_8bpp_cache(psx_gpu_struct *psx_gpu);
 void flush_render_block_buffer(psx_gpu_struct *psx_gpu);
+
+void setup_blocks_uv_adj_hack(psx_gpu_struct *psx_gpu, block_struct *block,
+    edge_data_struct *span_edge_data, vec_4x32u *span_uvrg_offset);
 
 void initialize_psx_gpu(psx_gpu_struct *psx_gpu, u16 *vram);
 u32 gpu_parse(psx_gpu_struct *psx_gpu, u32 *list, u32 size,

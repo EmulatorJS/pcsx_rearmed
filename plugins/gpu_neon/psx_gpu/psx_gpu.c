@@ -226,9 +226,9 @@ u32 texture_region_mask(s32 x1, s32 y1, s32 x2, s32 y2)
 
   coverage_x = x1 >> 6;
 
-  mask_up_left = 0xFFFF0000 << coverage_x;
-  if(coverage_x < 0)
-    mask_up_left = 0xFFFF0000;
+  mask_up_left = 0xFFFF0000;
+  if(coverage_x > 0)
+    mask_up_left <<= coverage_x;
 
   coverage_y = y1 >> 8;
   if(coverage_y <= 0)
@@ -528,6 +528,11 @@ void flush_render_block_buffer(psx_gpu_struct *psx_gpu)
     render_block_handler_struct *render_block_handler =
      psx_gpu->render_block_handler;
 
+#if defined(__arm__) && defined(NEON_BUILD) && !defined(SIMD_BUILD)
+    // the asm doesn't bother to save callee-save vector regs, so do it here
+    __asm__ __volatile__("":::"q4","q5","q6","q7");
+#endif
+
     render_block_handler->texture_blocks(psx_gpu);
     render_block_handler->shade_blocks(psx_gpu);
     render_block_handler->blend_blocks(psx_gpu);
@@ -538,6 +543,9 @@ void flush_render_block_buffer(psx_gpu_struct *psx_gpu)
 #endif
 
     psx_gpu->num_blocks = 0;
+#if defined(__arm__) && defined(NEON_BUILD) && !defined(SIMD_BUILD)
+    __asm__ __volatile__("":::"q4","q5","q6","q7");
+#endif
   }
 }
 
@@ -560,8 +568,9 @@ void flush_render_block_buffer(psx_gpu_struct *psx_gpu)
   y##set##_b.e[1] = vertex->b                                                  \
   
 
-void compute_all_gradients(psx_gpu_struct *psx_gpu, vertex_struct *a,
- vertex_struct *b, vertex_struct *c)
+void compute_all_gradients(psx_gpu_struct * __restrict__ psx_gpu,
+ const vertex_struct * __restrict__ a, const vertex_struct * __restrict__ b,
+ const vertex_struct * __restrict__ c)
 {
   u32 triangle_area = psx_gpu->triangle_area;
   u32 winding_mask_scalar;
@@ -1163,6 +1172,8 @@ static void setup_spans_debug_check(psx_gpu_struct *psx_gpu,
       setup_spans_set_x4(alternate, down, alternate_active);                   \
       height -= 4;                                                             \
     } while(height > 0);                                                       \
+    if (psx_gpu->hacks_active & (AHACK_TEXTURE_ADJ_U | AHACK_TEXTURE_ADJ_V))   \
+      span_uvrg_offset[height - 1].low = span_uvrg_offset[height - 2].low;     \
   }                                                                            \
 
 
@@ -1216,6 +1227,8 @@ static void setup_spans_debug_check(psx_gpu_struct *psx_gpu,
       setup_spans_set_x4(alternate, up, alternate_active);                     \
       height -= 4;                                                             \
     }                                                                          \
+    if (psx_gpu->hacks_active & AHACK_TEXTURE_ADJ_V)                           \
+      psx_gpu->span_uvrg_offset[0].low = psx_gpu->span_uvrg_offset[1].low;     \
   }                                                                            \
 
 #define index_left  0
@@ -1452,6 +1465,11 @@ void setup_spans_up_down(psx_gpu_struct *psx_gpu, vertex_struct *v_a,
       setup_spans_set_x4(none, down, no);
       height_minor_b -= 4;
     }
+    if (psx_gpu->hacks_active & (AHACK_TEXTURE_ADJ_U | AHACK_TEXTURE_ADJ_V))
+    {
+      span_uvrg_offset[height_minor_b - 1].low =
+        span_uvrg_offset[height_minor_b - 2].low;
+    }
   }
 
   left_split_triangles++;
@@ -1459,6 +1477,41 @@ void setup_spans_up_down(psx_gpu_struct *psx_gpu, vertex_struct *v_a,
 
 #endif
 
+// this is some hacky mess, can this be improved somehow?
+// ideally change things to not have to do this hack at all
+void __attribute__((noinline))
+setup_blocks_uv_adj_hack(psx_gpu_struct *psx_gpu, block_struct *block,
+    edge_data_struct *span_edge_data, vec_4x32u *span_uvrg_offset)
+{
+  size_t span_i = span_uvrg_offset - psx_gpu->span_uvrg_offset;
+  if (span_i != 0 && span_i != psx_gpu->num_spans - 1
+      && !(psx_gpu->hacks_active & AHACK_TEXTURE_ADJ_U))
+    return;
+  u32 num_blocks = span_edge_data->num_blocks - 1;
+  s32 offset = __builtin_ctz(span_edge_data->right_mask | 0x100) - 1;
+  s32 toffset = 8 * num_blocks + offset - 1;
+  if (toffset < 0 && !(psx_gpu->hacks_active & AHACK_TEXTURE_ADJ_U))
+    return;
+
+  toffset += span_edge_data->left_x;
+  s32 u_dx = psx_gpu->uvrg_dx.low.e[0];
+  s32 v_dx = psx_gpu->uvrg_dx.low.e[1];
+  u32 u = span_uvrg_offset->low.e[0];
+  u32 v = span_uvrg_offset->low.e[1];
+  u += u_dx * toffset;
+  v += v_dx * toffset;
+  u = (u >> 16) & psx_gpu->texture_mask_width;
+  v = (v >> 16) & psx_gpu->texture_mask_height;
+  if (!(psx_gpu->render_state_base & (TEXTURE_MODE_16BPP << 8))) {
+    // 4bpp 8bpp are swizzled
+    u32 u_ = u;
+    u = (u & 0x0f) | ((v & 0x0f) << 4);
+    v = (v & 0xf0) | (u_ >> 4);
+  }
+  assert(offset >= 0);
+  //assert(block->uv.e[offset] == ((v << 8) | u));
+  block->uv.e[offset] = (v << 8) | u;
+}
 
 #define dither_table_entry_normal(value)                                       \
   (value)                                                                      \
@@ -1563,7 +1616,7 @@ void setup_spans_up_down(psx_gpu_struct *psx_gpu, vertex_struct *v_a,
   vec_8x8s dither_offsets_short;                                               \
                                                                                \
   dither_row =                                                                 \
-   (dither_row >> dither_shift) | (dither_row << (32 - dither_shift));         \
+   (dither_row >> dither_shift) | ((u64)dither_row << (32 - dither_shift));    \
   dup_2x32b(vector_cast(vec_2x32u, dither_offsets_short), dither_row);         \
   setup_blocks_span_initialize_dithered_##texturing()                          \
 
@@ -1868,6 +1921,14 @@ void setup_spans_up_down(psx_gpu_struct *psx_gpu, vertex_struct *v_a,
 
 #define setup_blocks_store_draw_mask_untextured_direct(_block, bits)           \
 
+#define setup_blocks_uv_adj_hack_untextured(_block, edge_data, uvrg_offset)    \
+
+#define setup_blocks_uv_adj_hack_textured(_block, edge_data, uvrg_offset)      \
+{                                                                              \
+  u32 m_ = AHACK_TEXTURE_ADJ_U | AHACK_TEXTURE_ADJ_V;                          \
+  if (unlikely(psx_gpu->hacks_active & m_))                                    \
+    setup_blocks_uv_adj_hack(psx_gpu, _block, edge_data, uvrg_offset);         \
+}                                                                              \
 
 #define setup_blocks_add_blocks_indirect()                                     \
   num_blocks += span_num_blocks;                                               \
@@ -1882,7 +1943,7 @@ void setup_spans_up_down(psx_gpu_struct *psx_gpu, vertex_struct *v_a,
 
 #define setup_blocks_add_blocks_direct()                                       \
   stats_add(texel_blocks_untextured, span_num_blocks);                         \
-  span_pixel_blocks += span_num_blocks                                         \
+  stats_add(span_pixel_blocks, span_num_blocks);                               \
 
 
 #define setup_blocks_builder(shading, texturing, dithering, sw, target)        \
@@ -1938,6 +1999,8 @@ void setup_blocks_##shading##_##texturing##_##dithering##_##sw##_##target(     \
       setup_blocks_store_##shading##_##texturing(sw, dithering, target, edge); \
       setup_blocks_store_draw_mask_##texturing##_##target(block,               \
        span_edge_data->right_mask);                                            \
+      setup_blocks_uv_adj_hack_##texturing(block, span_edge_data,              \
+          span_uvrg_offset);                                                   \
                                                                                \
       block++;                                                                 \
     }                                                                          \
@@ -2863,9 +2926,9 @@ char *render_block_flag_strings[] =
    (triangle_winding_##winding << 6))                                          \
 
 static int prepare_triangle(psx_gpu_struct *psx_gpu, vertex_struct *vertexes,
- vertex_struct *vertexes_out[3])
+ prepared_triangle *triangle_out)
 {
-  s32 y_top, y_bottom;
+  s32 y_top, y_bottom, offset_x, offset_y, i;
   s32 triangle_area;
   u32 triangle_winding = 0;
 
@@ -2900,6 +2963,7 @@ static int prepare_triangle(psx_gpu_struct *psx_gpu, vertex_struct *vertexes,
 
   y_bottom = c->y;
   y_top = a->y;
+  offset_y = sign_extend_11bit(y_top + psx_gpu->offset_y) - y_top;
 
   if((y_bottom - y_top) >= 512)
   {
@@ -2927,7 +2991,7 @@ static int prepare_triangle(psx_gpu_struct *psx_gpu, vertex_struct *vertexes,
       vertex_swap(a, b);
   }
 
-  if((c->x - psx_gpu->offset_x) >= 1024 || (c->x - a->x) >= 1024)
+  if(c->x - a->x >= 1024)
   {
 #ifdef PROFILE
     trivial_rejects++;
@@ -2935,21 +2999,31 @@ static int prepare_triangle(psx_gpu_struct *psx_gpu, vertex_struct *vertexes,
     return 0;
   }
 
-  if(invalidate_texture_cache_region_viewport(psx_gpu, a->x, y_top, c->x,
-   y_bottom) == 0)
+  offset_x = sign_extend_11bit(a->x + psx_gpu->offset_x) - a->x;
+  if(invalidate_texture_cache_region_viewport(psx_gpu,
+      a->x + offset_x, y_top + offset_y,
+      c->x + offset_x, y_bottom + offset_y) == 0)
   {
 #ifdef PROFILE
     trivial_rejects++;
 #endif
     return 0;
+  }
+
+  for (i = 0; i < 3; i++)
+  {
+    vertexes[i].x += offset_x;
+    vertexes[i].y += offset_y;
   }
 
   psx_gpu->triangle_area = triangle_area;
   psx_gpu->triangle_winding = triangle_winding;
 
-  vertexes_out[0] = a;
-  vertexes_out[1] = b;
-  vertexes_out[2] = c;
+  triangle_out->vertexes[0] = a;
+  triangle_out->vertexes[1] = b;
+  triangle_out->vertexes[2] = c;
+  triangle_out->offset_x = offset_x;
+  triangle_out->offset_y = offset_y;
 
   return 1;
 }
@@ -2970,6 +3044,11 @@ static void render_triangle_p(psx_gpu_struct *psx_gpu,
   triangle_set_direction(y_direction_a, y_delta_a);
   triangle_set_direction(y_direction_b, y_delta_b);
   triangle_set_direction(y_direction_c, y_delta_c);
+
+#if defined(__arm__) && defined(NEON_BUILD) && !defined(SIMD_BUILD)
+  // the asm doesn't bother to save callee-save vector regs, so do it here
+  __asm__ __volatile__("vstmia %0, {q4-q7}" :: "r"(psx_gpu->saved_q4_q7) : "memory");
+#endif
 
   compute_all_gradients(psx_gpu, a, b, c);
 
@@ -3097,14 +3176,18 @@ static void render_triangle_p(psx_gpu_struct *psx_gpu,
    &(render_triangle_block_handlers[render_state]);
   ((setup_blocks_function_type *)psx_gpu->render_block_handler->setup_blocks)
    (psx_gpu);
+
+#if defined(__arm__) && defined(NEON_BUILD) && !defined(SIMD_BUILD)
+  __asm__ __volatile__("vldmia %0, {q4-q7}" :: "r"(psx_gpu->saved_q4_q7));
+#endif
 }
 
 void render_triangle(psx_gpu_struct *psx_gpu, vertex_struct *vertexes,
  u32 flags)
 {
-  vertex_struct *vertex_ptrs[3];
-  if (prepare_triangle(psx_gpu, vertexes, vertex_ptrs))
-    render_triangle_p(psx_gpu, vertex_ptrs, flags);
+  prepared_triangle triangle;
+  if (prepare_triangle(psx_gpu, vertexes, &triangle))
+    render_triangle_p(psx_gpu, triangle.vertexes, flags);
 }
 
 #if !defined(NEON_BUILD) || defined(SIMD_BUILD)
@@ -4810,8 +4893,7 @@ void render_block_fill(psx_gpu_struct *psx_gpu, u32 color, u32 x, u32 y,
   u32 r = color & 0xFF;
   u32 g = (color >> 8) & 0xFF;
   u32 b = (color >> 16) & 0xFF;
-  u32 color_16bpp = (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) |
-   psx_gpu->mask_msb;
+  u32 color_16bpp = (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
   u32 color_32bpp = color_16bpp | (color_16bpp << 16);
 
   u32 *vram_ptr = (u32 *)(psx_gpu->vram_out_ptr + x + (y * 1024));
@@ -4863,8 +4945,7 @@ void render_block_fill_enh(psx_gpu_struct *psx_gpu, u32 color, u32 x, u32 y,
   u32 r = color & 0xFF;
   u32 g = (color >> 8) & 0xFF;
   u32 b = (color >> 16) & 0xFF;
-  u32 color_16bpp = (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10) |
-   psx_gpu->mask_msb;
+  u32 color_16bpp = (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10);
   u32 color_32bpp = color_16bpp | (color_16bpp << 16);
 
   u32 *vram_ptr = (u32 *)(psx_gpu->vram_out_ptr + x + (y * 1024));
@@ -4952,7 +5033,7 @@ void initialize_reciprocal_table(void)
 
 
 #define dither_table_row(a, b, c, d)                                           \
- ((a & 0xFF) | ((b & 0xFF) << 8) | ((c & 0xFF) << 16) | ((d & 0xFF) << 24))    \
+ ((a & 0xFF) | ((b & 0xFF) << 8) | ((c & 0xFF) << 16) | ((u32)(d & 0xFF) << 24)) \
 
 void initialize_psx_gpu(psx_gpu_struct *psx_gpu, u16 *vram)
 {
@@ -5014,12 +5095,15 @@ void initialize_psx_gpu(psx_gpu_struct *psx_gpu, u16 *vram)
   psx_gpu->dither_table[1] = dither_table_row(2, -2, 3, -1);
   psx_gpu->dither_table[2] = dither_table_row(-3, 1, -4, 0);
   psx_gpu->dither_table[3] = dither_table_row(3, -1, 2, -2);
+  psx_gpu->allow_dithering = 1;
 
   psx_gpu->primitive_type = PRIMITIVE_TYPE_UNKNOWN;
 
   psx_gpu->saved_hres = 256;
+  psx_gpu->hacks_active = 0;
 
-  // check some offset
+  // check some offsets, asm relies on these
+  psx_gpu->reserved_a[(offsetof(psx_gpu_struct, test_mask) == 0) - 1] = 0;
   psx_gpu->reserved_a[(offsetof(psx_gpu_struct, blocks) == psx_gpu_blocks_offset) - 1] = 0;
 }
 
