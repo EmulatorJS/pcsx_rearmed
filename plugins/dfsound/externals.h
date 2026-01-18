@@ -24,14 +24,19 @@
 // generic defines
 /////////////////////////////////////////////////////////
 
-//#define log_unhandled printf
+#ifdef LOG_UNHANDLED
+#define log_unhandled printf
+#else
 #define log_unhandled(...)
+#endif
 
 #ifdef __GNUC__
 #define noinline __attribute__((noinline))
+#define forceinline __attribute__((always_inline))
 #define unlikely(x) __builtin_expect((x), 0)
 #else
 #define noinline
+#define forceinline
 #define unlikely(x) x
 #endif
 #if defined(__GNUC__) && !defined(_TMS320C6X)
@@ -85,8 +90,11 @@ typedef struct
  unsigned char  SustainRate;
  unsigned char  ReleaseRate;
  int            EnvelopeVol;
+ int            StepCounter;	// 0 -> 32k
 } ADSRInfoEx;
               
+struct xa_decode;
+
 ///////////////////////////////////////////////////////////
 
 // MAIN CHANNEL STRUCT
@@ -241,7 +249,7 @@ typedef struct
  //void (CALLBACK *cddavCallback)(short, short);
  void (CALLBACK *scheduleCallback)(unsigned int);
 
- const xa_decode_t * xapGlobal;
+ const struct xa_decode * xapGlobal;
  unsigned int  * XAFeed;
  unsigned int  * XAPlay;
  unsigned int  * XAStart;
@@ -291,7 +299,7 @@ void do_irq_io(int cycles_after);
 
 #endif
 
-void FeedXA(const xa_decode_t *xap);
+void FeedXA(const struct xa_decode *xap);
 void FeedCDDA(unsigned char *pcm, int nBytes);
 
 #endif /* __P_SOUND_EXTERNALS_H__ */

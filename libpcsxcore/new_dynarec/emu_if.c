@@ -6,6 +6,7 @@
  */
 
 #include <stdio.h>
+#include <assert.h>
 
 #include "emu_if.h"
 #include "pcsxmem.h"
@@ -22,7 +23,7 @@
 #define FLAGLESS
 #include "../gte.h"
 #if defined(NDRC_THREAD) && !defined(DRC_DISABLE) && !defined(LIGHTREC)
-#include "../../frontend/libretro-rthreads.h"
+#include "../../frontend/pcsxr-threads.h"
 #include "features/features_cpu.h"
 #include "retro_timers.h"
 #endif
@@ -487,7 +488,7 @@ static int ari64_thread_check_range(unsigned int start, unsigned int end)
 	return 1;
 }
 
-static void ari64_compile_thread(void *unused)
+static STRHEAD_RET_TYPE ari64_compile_thread(void *unused)
 {
 	struct ht_entry *hash_table =
 		*(void **)((char *)dynarec_local + LO_hash_table_ptr);
@@ -511,6 +512,7 @@ static void ari64_compile_thread(void *unused)
 	}
 	slock_unlock(ndrc_g.thread.lock);
 	(void)target;
+	STRHEAD_RETURN();
 }
 
 static void ari64_thread_shutdown(void)

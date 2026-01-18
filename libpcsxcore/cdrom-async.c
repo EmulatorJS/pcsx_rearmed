@@ -42,54 +42,10 @@ static int  rcdrom_isMediaInserted(void *stream) { return 0; }
 
 #endif
 
-#ifdef USE_C11_THREADS
-#include <threads.h>
-
-static int c11_threads_cb_wrapper(void *cb)
-{
-   ((void (*)(void *))cb)(NULL);
-
-   return 0;
-}
-
-#define slock_new() ({ \
-        mtx_t *lock = malloc(sizeof(*lock)); \
-        if (lock) mtx_init(lock, mtx_plain); \
-        lock; \
-})
-
-#define scond_new() ({ \
-        cnd_t *cnd = malloc(sizeof(*cnd)); \
-        if (cnd) cnd_init(cnd); \
-        cnd; \
-})
-
-#define pcsxr_sthread_create(cb, unused) ({ \
-        thrd_t *thd = malloc(sizeof(*thd)); \
-        if (thd) \
-                thrd_create(thd, c11_threads_cb_wrapper, cb); \
-        thd; \
-})
-
-#define sthread_join(thrd) ({ \
-        thrd_join(*thrd, NULL); \
-        free(thrd); \
-})
-
-#define slock_free(lock) free(lock)
-#define slock_lock(lock) mtx_lock(lock)
-#define slock_unlock(lock) mtx_unlock(lock)
-#define scond_free(cond) free(cond)
-#define scond_wait(cond, lock) cnd_wait(cond, lock)
-#define scond_signal(cond) cnd_signal(cond)
-#define slock_t mtx_t
-#define scond_t cnd_t
-#define sthread_t thrd_t
-#else
-#include "../frontend/libretro-rthreads.h"
-#endif
-
+#include "../frontend/pcsxr-threads.h"
+#ifdef HAVE_LIBRETRO
 #include "retro_timers.h"
+#endif
 
 struct cached_buf {
    u32 lba;
@@ -151,8 +107,10 @@ static void lbacache_do(u32 lba)
          memcpy(acdrom.buf_cache[i].buf_sub, buf_sub, sizeof(buf_sub));
    }
    slock_unlock(acdrom.buf_lock);
+#ifdef HAVE_LIBRETRO
    if (g_cd_handle)
       retro_sleep(0); // why does the main thread stall without this?
+#endif
 }
 
 static int lbacache_get(unsigned int lba, void *buf, void *sub_buf)
@@ -163,9 +121,8 @@ static int lbacache_get(unsigned int lba, void *buf, void *sub_buf)
    i = lba % acdrom.buf_cnt;
    slock_lock(acdrom.buf_lock);
    if (lba == acdrom.buf_cache[i].lba) {
-      if (!buf)
-         buf = acdrom.buf_local;
-      memcpy(buf, acdrom.buf_cache[i].buf, CD_FRAMESIZE_RAW);
+      if (buf)
+         memcpy(buf, acdrom.buf_cache[i].buf, CD_FRAMESIZE_RAW);
       if (sub_buf)
          memcpy(sub_buf, acdrom.buf_cache[i].buf_sub, SUB_FRAMESIZE);
       ret = 1;
@@ -176,7 +133,7 @@ static int lbacache_get(unsigned int lba, void *buf, void *sub_buf)
 
 // note: This has races on some vars but that's ok, main thread can deal
 // with it. Only unsafe buffer accesses and simultaneous reads are prevented.
-static void cdra_prefetch_thread(void *unused)
+static STRHEAD_RET_TYPE cdra_prefetch_thread(void *unused)
 {
    u32 buf_cnt, lba, lba_to;
 
@@ -211,6 +168,7 @@ static void cdra_prefetch_thread(void *unused)
       slock_lock(acdrom.buf_lock);
    }
    slock_unlock(acdrom.buf_lock);
+   STRHEAD_RETURN();
 }
 
 void cdra_stop_thread(void)
@@ -379,8 +337,6 @@ static int cdra_do_read(const unsigned char *time, int cdda,
          }
       }
       acdrom.do_prefetch = 0;
-      if (!buf)
-         buf = acdrom.buf_local;
       if (g_cd_handle) {
          if (buf_sub)
             ret = rcdrom_readSub(g_cd_handle, lba, buf_sub);
@@ -415,7 +371,7 @@ int cdra_readTrack(const unsigned char *time)
       // just forward to ISOreadTrack to avoid extra copying
       return ISOreadTrack(time, NULL);
    }
-   return cdra_do_read(time, 0, NULL, NULL);
+   return cdra_do_read(time, 0, acdrom.buf_local, NULL);
 }
 
 int cdra_readCDDA(const unsigned char *time, void *buffer)

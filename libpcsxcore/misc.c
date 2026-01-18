@@ -22,6 +22,8 @@
 */
 
 #include <stddef.h>
+#include <stdio.h>
+#include <ctype.h>
 #include <errno.h>
 #include <assert.h>
 #include "misc.h"
@@ -584,9 +586,7 @@ int Load(const char *ExePath) {
 								goto fail_io;
 							section_address = SWAPu32(section_address);
 							section_size = SWAPu32(section_size);
-#ifdef EMU_LOG
-							EMU_LOG("Loading %08X bytes from %08X to %08X\n", section_size, ftell(tmpFile), section_address);
-#endif
+							//printf("Loading %08X bytes from %08X to %08X\n", section_size, ftell(tmpFile), section_address);
 							mem = PSXM(section_address);
 							if (mem != INVALID_PTR) {
 								fread_to_ram(mem, section_size, 1, tmpFile);
@@ -767,6 +767,7 @@ int SaveState(const char *file) {
 	gpufP = (GPUFreeze_t *)malloc(sizeof(GPUFreeze_t));
 	if (gpufP == NULL) goto cleanup;
 	gpufP->ulFreezeVersion = 1;
+	memset(gpufP->ulControl, 0, sizeof(gpufP->ulControl));
 	GPU_freeze(1, gpufP);
 	SaveFuncs.write(f, gpufP, sizeof(GPUFreeze_t));
 	free(gpufP); gpufP = NULL;

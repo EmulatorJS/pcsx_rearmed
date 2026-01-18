@@ -43,18 +43,13 @@ extern "C" {
 #endif
 
 // System includes
-#include <stdio.h>
+//#include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <math.h>
-#include <time.h>
-#include <ctype.h>
 #ifndef __SWITCH__
 #include <sys/types.h>
 #endif
-#include <assert.h>
 
 // Define types
 typedef int8_t s8;
@@ -107,11 +102,6 @@ typedef uint8_t boolean;
 
 #endif
 
-extern FILE *emuLog;
-extern int Log;
-
-void __Log(char *fmt, ...);
-
 // lots of timing depends on this and makes or breaks compatibility,
 // don't change unless you're going to retest hundreds of games
 #define CYCLE_MULT_DEFAULT 175
@@ -132,7 +122,7 @@ typedef struct {
 	boolean Cdda;
 	boolean CHD_Precache; /* loads disk image into memory, works with CHD only. */
 	boolean HLE;
-	boolean SlowBoot;
+	uint8_t SlowBoot; // 0 = off, 1 = on, 2 = on, no PCSX 'ad'
 	boolean Debug;
 	boolean PsxOut;
 	boolean icache_emulation;
